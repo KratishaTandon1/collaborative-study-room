@@ -161,6 +161,9 @@ export const RealtimeSyncProvider = ({ children }) => {
     const savedUser = sessionStorage.getItem('study_user');
     const savedRooms = localStorage.getItem('study_rooms');
     const savedStats = localStorage.getItem('study_stats');
+    const savedProfiles = localStorage.getItem('study_profiles');
+    const savedFriends = localStorage.getItem('study_friends');
+    const savedDMs = localStorage.getItem('study_dms');
 
     if (savedUser) setUser(JSON.parse(savedUser));
     setRooms(savedRooms ? JSON.parse(savedRooms) : INITIAL_ROOMS);
@@ -176,16 +179,33 @@ export const RealtimeSyncProvider = ({ children }) => {
         setRooms(prev => [...prev, payload]);
       } else if (type === 'ROOM_DELETED') {
         setRooms(prev => prev.filter(r => r.id !== payload));
+      } else if (type === 'FRIENDS_UPDATE') {
+        setFriendsList(payload);
+        localStorage.setItem('study_friends', JSON.stringify(payload));
+      } else if (type === 'DM_MSG') {
+        setDmMessages(prev => {
+          if (prev.some(d => d.id === payload.id)) return prev;
+          const next = [...prev, payload];
+          localStorage.setItem('study_dms', JSON.stringify(next));
+          return next;
+        });
+      } else if (type === 'PROFILE_CREATED') {
+        setAllProfiles(prev => {
+          if (prev.some(p => p.id === payload.id)) return prev;
+          const next = [...prev, payload];
+          localStorage.setItem('study_profiles', JSON.stringify(next));
+          return next;
+        });
       }
     };
 
-    setAllProfiles([
+    setAllProfiles(savedProfiles ? JSON.parse(savedProfiles) : [
       { id: 'mock-1', username: 'Sarah', avatar_color: '#a78bfa', xp: 450 },
       { id: 'mock-2', username: 'David', avatar_color: '#f472b6', xp: 210 },
       { id: 'mock-3', username: 'Emily', avatar_color: '#34d399', xp: 820 }
     ]);
-    setFriendsList([]);
-    setDmMessages([]);
+    setFriendsList(savedFriends ? JSON.parse(savedFriends) : []);
+    setDmMessages(savedDMs ? JSON.parse(savedDMs) : []);
 
     setLoading(false);
   };
@@ -262,6 +282,14 @@ export const RealtimeSyncProvider = ({ children }) => {
               });
             }
           });
+        })
+        .subscribe();
+
+      // 7. Subscribe to profiles updates
+      supabase
+        .channel('profiles-changes')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
+          fetchAllProfiles();
         })
         .subscribe();
 
@@ -443,6 +471,16 @@ export const RealtimeSyncProvider = ({ children }) => {
       };
       setUser(newUser);
       sessionStorage.setItem('study_user', JSON.stringify(newUser));
+
+      // Register profile in fallback list and notify tabs
+      const profile = { id: newUser.id, username: newUser.name, avatar_color: newUser.avatarColor, xp: stats.xp };
+      setAllProfiles(prev => {
+        const list = prev.filter(p => p.id !== newUser.id);
+        const next = [...list, profile];
+        localStorage.setItem('study_profiles', JSON.stringify(next));
+        localBroadcastChannelRef.current?.postMessage({ type: 'PROFILE_CREATED', payload: profile });
+        return next;
+      });
       return;
     }
 
@@ -1304,7 +1342,12 @@ export const RealtimeSyncProvider = ({ children }) => {
         status: 'pending',
         sender_id: user.id
       };
-      setFriendsList(prev => [...prev, newRequest]);
+      setFriendsList(prev => {
+        const next = [...prev, newRequest];
+        localStorage.setItem('study_friends', JSON.stringify(next));
+        localBroadcastChannelRef.current?.postMessage({ type: 'FRIENDS_UPDATE', payload: next });
+        return next;
+      });
       return;
     }
 
@@ -1348,7 +1391,12 @@ export const RealtimeSyncProvider = ({ children }) => {
 
   const acceptFriendRequest = async (requestId) => {
     if (!isSupabaseConfigured) {
-      setFriendsList(prev => prev.map(f => f.id === requestId ? { ...f, status: 'accepted' } : f));
+      setFriendsList(prev => {
+        const next = prev.map(f => f.id === requestId ? { ...f, status: 'accepted' } : f);
+        localStorage.setItem('study_friends', JSON.stringify(next));
+        localBroadcastChannelRef.current?.postMessage({ type: 'FRIENDS_UPDATE', payload: next });
+        return next;
+      });
       return;
     }
 
@@ -1362,7 +1410,12 @@ export const RealtimeSyncProvider = ({ children }) => {
 
   const cancelOrRemoveFriend = async (requestId) => {
     if (!isSupabaseConfigured) {
-      setFriendsList(prev => prev.filter(f => f.id !== requestId));
+      setFriendsList(prev => {
+        const next = prev.filter(f => f.id !== requestId);
+        localStorage.setItem('study_friends', JSON.stringify(next));
+        localBroadcastChannelRef.current?.postMessage({ type: 'FRIENDS_UPDATE', payload: next });
+        return next;
+      });
       return;
     }
 
@@ -1389,7 +1442,12 @@ export const RealtimeSyncProvider = ({ children }) => {
         room_id: roomId,
         created_at: new Date().toISOString()
       };
-      setDmMessages(prev => [...prev, newDm]);
+      setDmMessages(prev => {
+        const next = [...prev, newDm];
+        localStorage.setItem('study_dms', JSON.stringify(next));
+        localBroadcastChannelRef.current?.postMessage({ type: 'DM_MSG', payload: newDm });
+        return next;
+      });
       return;
     }
 
