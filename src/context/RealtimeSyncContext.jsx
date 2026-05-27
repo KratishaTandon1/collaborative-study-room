@@ -84,7 +84,10 @@ export const RealtimeSyncProvider = ({ children }) => {
   // Common states
   const [user, setUser] = useState(null);
   const [rooms, setRooms] = useState([]);
-  const [activeRoomId, setActiveRoomId] = useState(null);
+  const [activeRoomId, setActiveRoomId] = useState(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('room') || null;
+  });
   const [chatMessages, setChatMessages] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [participants, setParticipants] = useState([]);
@@ -118,6 +121,14 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
   }, []);
 
+  useEffect(() => {
+    if (activeRoomId) {
+      window.history.pushState(null, '', `/?room=${activeRoomId}`);
+    } else {
+      window.history.pushState(null, '', '/');
+    }
+  }, [activeRoomId]);
+
   // --- LOCAL FALLBACK MODE ---
   const initLocalFallback = () => {
     // Load local storage
@@ -137,6 +148,8 @@ export const RealtimeSyncProvider = ({ children }) => {
       const { type, payload } = event.data;
       if (type === 'ROOM_CREATED') {
         setRooms(prev => [...prev, payload]);
+      } else if (type === 'ROOM_DELETED') {
+        setRooms(prev => prev.filter(r => r.id !== payload));
       }
     };
 
@@ -759,8 +772,23 @@ export const RealtimeSyncProvider = ({ children }) => {
   };
 
   // --- Create Room ---
-  const createRoom = async (name, description, category, tagsArray, timerMode, durationMinutes) => {
+  const createRoom = async (name, description, category, tagsArray, timerMode, durationMinutes, isPrivate = false) => {
     if (!user) return;
+
+    // Check public rooms limit
+    if (!isPrivate) {
+      const publicCreatedRooms = rooms.filter(r => {
+        const isCreator = isSupabaseConfigured 
+          ? r.creator_id === user.id 
+          : r.creator === user.name;
+        const isRoomPrivate = r.is_private || false;
+        return isCreator && !isRoomPrivate;
+      });
+      if (publicCreatedRooms.length >= 2) {
+        throw new Error("You have reached the limit of 2 public rooms. Please delete an existing public room or make this room private.");
+      }
+    }
+
     const durationSeconds = durationMinutes * 60;
     const tags = tagsArray.split(',').map(t => t.trim()).filter(Boolean);
     const bgImage = 'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?q=80&w=600&auto=format&fit=crop';
@@ -776,9 +804,14 @@ export const RealtimeSyncProvider = ({ children }) => {
         creator: user.name,
         timerMode,
         timerDuration: durationSeconds,
-        bgImage
+        bgImage,
+        is_private: isPrivate
       };
-      setRooms(prev => [...prev, newRoom]);
+      setRooms(prev => {
+        const next = [...prev, newRoom];
+        localStorage.setItem('study_rooms', JSON.stringify(next));
+        return next;
+      });
       localBroadcastChannelRef.current?.postMessage({
         type: 'ROOM_CREATED',
         payload: newRoom
@@ -798,14 +831,15 @@ export const RealtimeSyncProvider = ({ children }) => {
         timer_mode: timerMode,
         timer_duration: durationSeconds,
         timer_paused_seconds_left: durationSeconds,
-        bg_image: bgImage
+        bg_image: bgImage,
+        is_private: isPrivate
       })
       .select()
       .single();
 
     if (error) {
       console.error(error);
-      return;
+      throw error;
     }
 
     // Create a whiteboard record
@@ -815,6 +849,32 @@ export const RealtimeSyncProvider = ({ children }) => {
     });
 
     return data.id;
+  };
+
+  // --- Delete Room ---
+  const deleteRoom = async (roomId) => {
+    if (!isSupabaseConfigured) {
+      setRooms(prev => {
+        const next = prev.filter(r => r.id !== roomId);
+        localStorage.setItem('study_rooms', JSON.stringify(next));
+        return next;
+      });
+      localBroadcastChannelRef.current?.postMessage({
+        type: 'ROOM_DELETED',
+        payload: roomId
+      });
+      return;
+    }
+
+    const { error } = await supabase
+      .from('rooms')
+      .delete()
+      .eq('id', roomId);
+
+    if (error) {
+      console.error("Error deleting room:", error);
+      throw error;
+    }
   };
 
   // --- Send System Alert ---
@@ -1101,6 +1161,7 @@ export const RealtimeSyncProvider = ({ children }) => {
         loading,
         rooms,
         createRoom,
+        deleteRoom,
         activeRoomId,
         joinRoom,
         leaveRoom,

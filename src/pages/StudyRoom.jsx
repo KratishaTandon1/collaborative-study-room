@@ -30,11 +30,33 @@ export default function StudyRoom() {
 
   const currentRoom = rooms.find(r => r.id === activeRoomId);
 
+  if (!currentRoom) {
+    return (
+      <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', maxWidth: '500px', margin: '60px auto', border: '1px solid rgba(244,63,94,0.2)' }}>
+        <h2 style={{ color: 'var(--color-accent)', marginBottom: '12px', fontFamily: 'var(--font-display)', fontSize: '1.6rem' }}>Den Not Found</h2>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', fontSize: '0.95rem' }}>
+          The study room you are trying to join does not exist, has been deleted, or the link is incorrect.
+        </p>
+        <button className="btn btn-primary" onClick={() => leaveRoom(activeRoomId)} style={{ padding: '10px 20px', margin: '0 auto' }}>
+          Go to Dashboard
+        </button>
+      </div>
+    );
+  }
+
   // States
   const [inputText, setInputText] = useState('');
   const [taskText, setTaskText] = useState('');
   const [isDistractionFree, setIsDistractionFree] = useState(false);
   const [selectedStatus, setSelectedStatus] = useState('Focusing ✍️');
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  const handleCopyShareLink = () => {
+    const inviteUrl = `${window.location.origin}/?room=${activeRoomId}`;
+    navigator.clipboard.writeText(inviteUrl);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
 
   // Ambience audio states
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
@@ -216,11 +238,45 @@ export default function StudyRoom() {
           </button>
 
           <div style={{ textAlign: 'center' }}>
-            <h2 style={{ fontSize: '1.4rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>
+            <h2 style={{ fontSize: '1.4rem', fontWeight: 700, fontFamily: 'var(--font-display)', display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center' }}>
               {currentRoom?.name}
+              {currentRoom?.is_private && (
+                <span style={{ 
+                  fontSize: '0.7rem', 
+                  color: 'var(--color-secondary)', 
+                  background: 'rgba(6, 182, 212, 0.08)', 
+                  padding: '2px 8px', 
+                  borderRadius: '12px', 
+                  border: '1px solid rgba(6, 182, 212, 0.25)',
+                  fontWeight: 600,
+                  letterSpacing: '0.5px'
+                }}>
+                  Private
+                </span>
+              )}
             </h2>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              Created by: {currentRoom?.creator} • Category: {currentRoom?.category}
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center', marginTop: '4px' }}>
+              Created by: {currentRoom?.creator || 'Community'} • Category: {currentRoom?.category}
+              •
+              <button 
+                onClick={handleCopyShareLink}
+                style={{ 
+                  background: 'none', 
+                  border: 'none', 
+                  color: copiedLink ? 'var(--color-success)' : 'var(--color-primary)', 
+                  cursor: 'pointer', 
+                  fontSize: '0.8rem', 
+                  padding: 0, 
+                  textDecoration: 'underline',
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  gap: '4px',
+                  fontWeight: 600,
+                  transition: 'color 0.2s'
+                }}
+              >
+                {copiedLink ? '✓ Copied Link!' : '🔗 Copy Invite Link'}
+              </button>
             </span>
           </div>
 

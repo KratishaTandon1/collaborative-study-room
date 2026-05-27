@@ -7,7 +7,7 @@ import {
 
 export default function Dashboard() {
   const { 
-    user, rooms, createRoom, joinRoom, stats, addManualSession, allParticipants 
+    user, rooms, createRoom, deleteRoom, joinRoom, stats, addManualSession, allParticipants, supabase
   } = useRealtimeSync();
 
   const [search, setSearch] = useState('');
@@ -21,47 +21,97 @@ export default function Dashboard() {
   const [roomTags, setRoomTags] = useState('');
   const [timerMode, setTimerMode] = useState('pomodoro');
   const [timerDuration, setTimerDuration] = useState(25);
+  const [roomIsPrivate, setRoomIsPrivate] = useState(false);
+  const [modalError, setModalError] = useState('');
 
   // Manual session logging states
   const [manualMin, setManualMin] = useState(30);
   const [manualTopic, setManualTopic] = useState('');
   const [manualSuccessMsg, setManualSuccessMsg] = useState('');
 
+  // Join Private Room states
+  const [joinPrivateId, setJoinPrivateId] = useState('');
+  const [joinPrivateError, setJoinPrivateError] = useState('');
+
   // Extract categories
   const categories = ['All', ...new Set(rooms.map(r => r.category))];
 
   // Filtered rooms
   const filteredRooms = rooms.filter(room => {
+    // Exclude private rooms from the public dashboard
+    if (room.is_private) return false;
+
     const matchesSearch = room.name.toLowerCase().includes(search.toLowerCase()) || 
                           room.tags.some(tag => tag.toLowerCase().includes(search.toLowerCase()));
     const matchesCat = activeCategory === 'All' || room.category === activeCategory;
     return matchesSearch && matchesCat;
   });
 
-  const handleCreateRoom = (e) => {
+  const handleCreateRoom = async (e) => {
     e.preventDefault();
     if (!roomName.trim()) return;
+    setModalError('');
     
-    const newRoomId = createRoom(
-      roomName.trim(),
-      roomDesc.trim(),
-      roomCat,
-      roomTags,
-      timerMode,
-      parseInt(timerDuration)
-    );
+    try {
+      const newRoomId = await createRoom(
+        roomName.trim(),
+        roomDesc.trim(),
+        roomCat,
+        roomTags,
+        timerMode,
+        parseInt(timerDuration),
+        roomIsPrivate
+      );
 
-    // Reset form
-    setRoomName('');
-    setRoomDesc('');
-    setRoomCat('Lofi');
-    setRoomTags('');
-    setTimerMode('pomodoro');
-    setTimerDuration(25);
-    setShowCreateModal(false);
+      if (newRoomId) {
+        // Reset form
+        setRoomName('');
+        setRoomDesc('');
+        setRoomCat('Lofi');
+        setRoomTags('');
+        setTimerMode('pomodoro');
+        setTimerDuration(25);
+        setRoomIsPrivate(false);
+        setModalError('');
+        setShowCreateModal(false);
 
-    // Join room instantly
-    joinRoom(newRoomId);
+        // Join room instantly
+        joinRoom(newRoomId);
+      }
+    } catch (err) {
+      setModalError(err.message || 'Error creating room');
+    }
+  };
+
+  const handleJoinPrivate = async (e) => {
+    e.preventDefault();
+    setJoinPrivateError('');
+    const id = joinPrivateId.trim();
+    if (!id) return;
+
+    // Check local state rooms list
+    const localRoom = rooms.find(r => r.id === id);
+    if (localRoom) {
+      joinRoom(localRoom.id);
+      return;
+    }
+
+    if (supabase) {
+      // Query database directly
+      const { data, error } = await supabase
+        .from('rooms')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (!error && data) {
+        joinRoom(data.id);
+      } else {
+        setJoinPrivateError('Room not found. Check the ID/Link.');
+      }
+    } else {
+      setJoinPrivateError('Room not found. Check the ID/Link.');
+    }
   };
 
   const handleLogManualSession = (e) => {
@@ -142,6 +192,32 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Join Private Room Panel */}
+        <div className="glass-panel" style={{ padding: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: '180px' }}>
+            <h4 style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>Join Private Den</h4>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Enter a room ID code to join an unlisted study room.</p>
+          </div>
+          <form onSubmit={handleJoinPrivate} style={{ display: 'flex', gap: '8px', flex: 1.5, minWidth: '260px', position: 'relative' }}>
+            <input
+              type="text"
+              className="form-control"
+              placeholder="Paste Room ID (e.g. 8f4a-96ac...)"
+              value={joinPrivateId}
+              onChange={(e) => setJoinPrivateId(e.target.value)}
+              style={{ flex: 1, fontSize: '0.85rem', padding: '8px 12px' }}
+            />
+            <button type="submit" className="btn btn-primary" style={{ padding: '8px 16px', fontSize: '0.85rem', whiteSpace: 'nowrap' }}>
+              Join Den
+            </button>
+          </form>
+          {joinPrivateError && (
+            <div style={{ width: '100%', fontSize: '0.8rem', color: 'var(--color-accent)', marginTop: '2px', textAlign: 'left' }}>
+              ⚠️ {joinPrivateError}
+            </div>
+          )}
+        </div>
+
         {/* Study Room Cards Grid */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '20px' }}>
           {filteredRooms.map(room => {
@@ -149,6 +225,8 @@ export default function Dashboard() {
               ? (allParticipants[room.id] || [])
               : [];
             const onlineCount = activeParticipants.length || (room.id === 'room-1' ? 3 : room.id === 'room-2' ? 2 : 1);
+            const isCreator = user && (room.creator_id === user.id || room.creator === user.name);
+
             return (
               <div 
                 key={room.id} 
@@ -215,11 +293,35 @@ export default function Dashboard() {
                   </div>
 
                   {/* Footer Metrics */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.04)', gap: '10px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-muted)', marginRight: 'auto' }}>
                       <Clock size={14} />
                       <span>{room.timerMode === 'pomodoro' ? `${room.timerDuration / 60}m Pomodoro` : 'Stopwatch'}</span>
                     </div>
+
+                    {/* Delete button for creators */}
+                    {isCreator && (
+                      <button 
+                        className="btn btn-secondary" 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm(`Are you sure you want to delete "${room.name}"?`)) {
+                            deleteRoom(room.id);
+                          }
+                        }}
+                        title="Delete Room"
+                        style={{ 
+                          padding: '6px', 
+                          display: 'inline-flex', 
+                          alignItems: 'center', 
+                          background: 'rgba(244, 63, 94, 0.05)', 
+                          borderColor: 'rgba(244, 63, 94, 0.15)',
+                          color: '#f43f5e'
+                        }}
+                      >
+                        <Trash size={14} />
+                      </button>
+                    )}
 
                     <button className="btn btn-primary" onClick={() => joinRoom(room.id)} style={{ padding: '6px 14px', fontSize: '0.85rem' }}>
                       Enter Den <ArrowRight size={14} />
@@ -472,8 +574,28 @@ export default function Dashboard() {
                 />
               </div>
 
+              {/* Private Checkbox */}
+              <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  id="roomIsPrivate"
+                  checked={roomIsPrivate}
+                  onChange={(e) => setRoomIsPrivate(e.target.checked)}
+                  style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: 'var(--color-primary)' }}
+                />
+                <label htmlFor="roomIsPrivate" style={{ fontSize: '0.85rem', color: 'var(--text-primary)', cursor: 'pointer', userSelect: 'none', fontWeight: 500 }}>
+                  Make Room Private (Shareable via link/ID only)
+                </label>
+              </div>
+
+              {modalError && (
+                <div style={{ color: 'var(--color-accent)', fontSize: '0.85rem', textAlign: 'left', marginTop: '4px' }}>
+                  ⚠️ {modalError}
+                </div>
+              )}
+
               <div style={{ display: 'flex', gap: '12px', marginTop: '12px' }}>
-                <button type="button" className="btn btn-secondary" onClick={() => setShowCreateModal(false)} style={{ flex: 1 }}>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowCreateModal(false); setModalError(''); setRoomIsPrivate(false); }} style={{ flex: 1 }}>
                   Cancel
                 </button>
                 <button type="submit" className="btn btn-primary" style={{ flex: 1 }}>
