@@ -220,6 +220,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     // 1. Periodic health check every 8 seconds
     const healthCheckInterval = setInterval(() => {
       if (globalCleanedUpRef.current) return;
+      if (!userRef.current) return; // Only monitor if user is logged in
 
       const globalStatus = globalChanStatusRef.current;
       console.log(`[HEALTHCHECK] Global connection status: ${globalStatus}`);
@@ -242,6 +243,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     // 2. Reactivate on focus or visibility change
     const handleReactivation = () => {
       if (globalCleanedUpRef.current) return;
+      if (!userRef.current) return; // Only reactivate if user is logged in
       console.log("[REACTIVATION] Tab became active. Checking connection health...");
 
       if (globalChanStatusRef.current !== 'SUBSCRIBED') {
@@ -394,7 +396,12 @@ export const RealtimeSyncProvider = ({ children }) => {
               setRooms(dbRooms.map(normalizeRoom));
             }
 
-            const userId = userRef.current?.id;
+            let userId = userRef.current?.id;
+            if (!userId) {
+              const { data: { session } } = await supabase.auth.getSession();
+              userId = session?.user?.id;
+            }
+
             if (userId) {
               await fetchFriendships(userId);
               await fetchDirectMessages(userId);
@@ -616,6 +623,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       if (globalCleanedUpRef.current) return;
       if (session) {
         await handleSupabaseUserSignIn(session.user);
+        subscribeGlobalChan();
       }
       if (globalCleanedUpRef.current) return;
 
@@ -624,9 +632,24 @@ export const RealtimeSyncProvider = ({ children }) => {
         if (globalCleanedUpRef.current) return;
         if (session) {
           await handleSupabaseUserSignIn(session.user);
+          subscribeGlobalChan();
         } else {
           setUser(null);
           setStats({ xp: 0, totalMinutes: 0, completedSessions: 0, streakDays: 0, badges: ALL_BADGES, sessionHistory: [] });
+          
+          // Teardown global channel on logout
+          if (globalChanRef.current) {
+            try { supabase.removeChannel(globalChanRef.current); } catch (e) {}
+            globalChanRef.current = null;
+          }
+          globalChanStatusRef.current = 'none';
+
+          // Teardown room channel on logout
+          if (roomSyncChanRef.current) {
+            try { supabase.removeChannel(roomSyncChanRef.current); } catch (e) {}
+            roomSyncChanRef.current = null;
+          }
+          roomSyncChanStatusRef.current = 'none';
         }
       });
       if (globalCleanedUpRef.current) {
@@ -647,9 +670,6 @@ export const RealtimeSyncProvider = ({ children }) => {
       if (!roomsError && dbRooms) {
         setRooms(dbRooms.map(normalizeRoom));
       }
-
-      // 4. Subscribe to global changes
-      subscribeGlobalChan();
 
       if (globalCleanedUpRef.current) return;
       setLoading(false);
