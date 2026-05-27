@@ -22,9 +22,6 @@ const supabase = isSupabaseConfigured
         storage: typeof window !== 'undefined' ? window.sessionStorage : undefined,
         persistSession: true,
         autoRefreshToken: true
-      },
-      realtime: {
-        worker: true
       }
     }) 
   : null;
@@ -1503,6 +1500,16 @@ export const RealtimeSyncProvider = ({ children }) => {
     const nextIsRunning = !room.timer_is_running;
     const now = new Date().toISOString();
 
+    // Optimistic local update
+    setRooms(prev => prev.map(r => r.id === roomId ? {
+      ...r,
+      timer_is_running: nextIsRunning,
+      timer_started_at: nextIsRunning ? now : null,
+      timer_paused_seconds_left: nextIsRunning 
+        ? r.timer_paused_seconds_left 
+        : timerStateRef.current.secondsLeft
+    } : r));
+
     try {
       const { error } = await supabase
         .from('rooms')
@@ -1522,6 +1529,13 @@ export const RealtimeSyncProvider = ({ children }) => {
         : `${userRef.current?.name || 'Someone'} paused the timer.`
       );
     } catch (err) {
+      // Revert optimistic update
+      setRooms(prev => prev.map(r => r.id === roomId ? {
+        ...r,
+        timer_is_running: room.timer_is_running,
+        timer_started_at: room.timer_started_at,
+        timer_paused_seconds_left: room.timer_paused_seconds_left
+      } : r));
       console.error("Error toggling timer:", err);
       alert("Failed to toggle timer: " + (err.message || err));
     }
@@ -1546,6 +1560,14 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
+    // Optimistic local update
+    setRooms(prev => prev.map(r => r.id === roomId ? {
+      ...r,
+      timer_is_running: false,
+      timer_started_at: null,
+      timer_paused_seconds_left: defaultSecs
+    } : r));
+
     try {
       const { error } = await supabase
         .from('rooms')
@@ -1560,6 +1582,13 @@ export const RealtimeSyncProvider = ({ children }) => {
 
       await sendSystemAlert(roomId, `${userRef.current?.name || 'Someone'} reset the timer.`);
     } catch (err) {
+      // Revert optimistic update
+      setRooms(prev => prev.map(r => r.id === roomId ? {
+        ...r,
+        timer_is_running: room.timer_is_running,
+        timer_started_at: room.timer_started_at,
+        timer_paused_seconds_left: room.timer_paused_seconds_left
+      } : r));
       console.error("Error resetting timer:", err);
       alert("Failed to reset timer: " + (err.message || err));
     }
@@ -1584,6 +1613,15 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
+    // Optimistic local update
+    setRooms(prev => prev.map(r => r.id === roomId ? {
+      ...r,
+      timer_is_running: false,
+      timer_started_at: null,
+      timer_current_mode: newMode,
+      timer_paused_seconds_left: defaultSecs
+    } : r));
+
     try {
       const { error } = await supabase
         .from('rooms')
@@ -1599,6 +1637,14 @@ export const RealtimeSyncProvider = ({ children }) => {
 
       await sendSystemAlert(roomId, `${userRef.current?.name || 'Someone'} changed timer to ${newMode} mode.`);
     } catch (err) {
+      // Revert optimistic update
+      setRooms(prev => prev.map(r => r.id === roomId ? {
+        ...r,
+        timer_is_running: room.timer_is_running,
+        timer_started_at: room.timer_started_at,
+        timer_current_mode: room.timer_current_mode,
+        timer_paused_seconds_left: room.timer_paused_seconds_left
+      } : r));
       console.error("Error setting timer mode:", err);
       alert("Failed to set timer mode: " + (err.message || err));
     }
