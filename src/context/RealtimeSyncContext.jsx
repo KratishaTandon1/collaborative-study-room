@@ -22,6 +22,9 @@ const supabase = isSupabaseConfigured
         storage: typeof window !== 'undefined' ? window.sessionStorage : undefined,
         persistSession: true,
         autoRefreshToken: true
+      },
+      realtime: {
+        worker: true
       }
     }) 
   : null;
@@ -160,6 +163,14 @@ export const RealtimeSyncProvider = ({ children }) => {
   const statsRef = useRef(stats);
   const timerStateRef = useRef(timerState);
 
+  const globalCleanedUpRef = useRef(false);
+  const globalTimeoutsRef = useRef({
+    rooms: null,
+    friends: null,
+    dm: null,
+    profiles: null
+  });
+
   useEffect(() => {
     userRef.current = user;
   }, [user]);
@@ -177,6 +188,7 @@ export const RealtimeSyncProvider = ({ children }) => {
   // =================================================================
 
   useEffect(() => {
+    globalCleanedUpRef.current = false;
     if (isSupabaseConfigured) {
       initSupabase();
     } else {
@@ -184,13 +196,29 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     return () => {
+      globalCleanedUpRef.current = true;
+      clearTimeout(globalTimeoutsRef.current.rooms);
+      clearTimeout(globalTimeoutsRef.current.friends);
+      clearTimeout(globalTimeoutsRef.current.dm);
+      clearTimeout(globalTimeoutsRef.current.profiles);
+
       if (isSupabaseConfigured && supabase) {
         const { roomsChan, friendsChan, dmChan, profilesChan } = globalChannelsRef.current;
-        if (roomsChan) supabase.removeChannel(roomsChan);
-        if (friendsChan) supabase.removeChannel(friendsChan);
-        if (dmChan) supabase.removeChannel(dmChan);
-        if (profilesChan) supabase.removeChannel(profilesChan);
-        if (authSubscriptionRef.current) authSubscriptionRef.current.unsubscribe();
+        if (roomsChan) {
+          try { supabase.removeChannel(roomsChan); } catch (e) {}
+        }
+        if (friendsChan) {
+          try { supabase.removeChannel(friendsChan); } catch (e) {}
+        }
+        if (dmChan) {
+          try { supabase.removeChannel(dmChan); } catch (e) {}
+        }
+        if (profilesChan) {
+          try { supabase.removeChannel(profilesChan); } catch (e) {}
+        }
+        if (authSubscriptionRef.current) {
+          try { authSubscriptionRef.current.unsubscribe(); } catch (e) {}
+        }
       }
     };
   }, []);
@@ -263,12 +291,15 @@ export const RealtimeSyncProvider = ({ children }) => {
     try {
       // 1. Session check
       const { data: { session } } = await supabase.auth.getSession();
+      if (globalCleanedUpRef.current) return;
       if (session) {
         await handleSupabaseUserSignIn(session.user);
       }
+      if (globalCleanedUpRef.current) return;
 
       // 2. Auth state change listener
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (globalCleanedUpRef.current) return;
         if (session) {
           await handleSupabaseUserSignIn(session.user);
         } else {
@@ -276,6 +307,12 @@ export const RealtimeSyncProvider = ({ children }) => {
           setStats({ xp: 0, totalMinutes: 0, completedSessions: 0, streakDays: 0, badges: ALL_BADGES, sessionHistory: [] });
         }
       });
+      if (globalCleanedUpRef.current) {
+        if (subscription) {
+          try { subscription.unsubscribe(); } catch (e) {}
+        }
+        return;
+      }
       authSubscriptionRef.current = subscription;
 
       // 3. Fetch rooms
@@ -284,80 +321,148 @@ export const RealtimeSyncProvider = ({ children }) => {
         .select('*')
         .order('created_at', { ascending: true });
 
+      if (globalCleanedUpRef.current) return;
       if (!roomsError && dbRooms) {
         setRooms(dbRooms.map(normalizeRoom));
       }
 
       // 4. Subscribe to public rooms table updates
-      const roomsChan = supabase
-        .channel('rooms-all-changes')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
-          if (payload.eventType === 'INSERT') {
-            setRooms(prev => {
-              const normalized = normalizeRoom(payload.new);
-              if (prev.some(r => r.id === normalized.id)) return prev;
-              return [...prev, normalized];
-            });
-          } else if (payload.eventType === 'UPDATE') {
-            setRooms(prev => prev.map(r => r.id === payload.new.id ? normalizeRoom(payload.new) : r));
-          } else if (payload.eventType === 'DELETE') {
-            setRooms(prev => prev.filter(r => r.id !== payload.old.id));
-          }
-        })
-        .subscribe((status, err) => {
-          if (err) console.error("rooms-all-changes subscription error:", err);
-          console.log("rooms-all-changes subscription status:", status);
-        });
-      globalChannelsRef.current.roomsChan = roomsChan;
+      let roomsChan = null;
+      const subscribeRooms = () => {
+        if (globalCleanedUpRef.current) return;
+        if (roomsChan) {
+          try { supabase.removeChannel(roomsChan); } catch (e) {}
+        }
+
+        roomsChan = supabase
+          .channel('rooms-all-changes')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
+            if (globalCleanedUpRef.current) return;
+            if (payload.eventType === 'INSERT') {
+              setRooms(prev => {
+                const normalized = normalizeRoom(payload.new);
+                if (prev.some(r => r.id === normalized.id)) return prev;
+                return [...prev, normalized];
+              });
+            } else if (payload.eventType === 'UPDATE') {
+              setRooms(prev => prev.map(r => r.id === payload.new.id ? normalizeRoom(payload.new) : r));
+            } else if (payload.eventType === 'DELETE') {
+              setRooms(prev => prev.filter(r => r.id !== payload.old.id));
+            }
+          })
+          .subscribe((status, err) => {
+            if (globalCleanedUpRef.current) return;
+            if (err) console.error("rooms-all-changes subscription error:", err);
+            console.log("rooms-all-changes subscription status:", status);
+            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              console.warn(`rooms-all-changes disconnected (${status}). Re-subscribing in 5s...`);
+              clearTimeout(globalTimeoutsRef.current.rooms);
+              globalTimeoutsRef.current.rooms = setTimeout(subscribeRooms, 5000);
+            }
+          });
+        globalChannelsRef.current.roomsChan = roomsChan;
+      };
+      subscribeRooms();
 
       // 5. Subscribe to friends updates
-      const friendsChan = supabase
-        .channel('friends-changes')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
-          const userId = userRef.current?.id;
-          if (userId) fetchFriendships(userId);
-        })
-        .subscribe((status, err) => {
-          if (err) console.error("friends-changes subscription error:", err);
-          console.log("friends-changes subscription status:", status);
-        });
-      globalChannelsRef.current.friendsChan = friendsChan;
+      let friendsChan = null;
+      const subscribeFriends = () => {
+        if (globalCleanedUpRef.current) return;
+        if (friendsChan) {
+          try { supabase.removeChannel(friendsChan); } catch (e) {}
+        }
+
+        friendsChan = supabase
+          .channel('friends-changes')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
+            if (globalCleanedUpRef.current) return;
+            const userId = userRef.current?.id;
+            if (userId) fetchFriendships(userId);
+          })
+          .subscribe((status, err) => {
+            if (globalCleanedUpRef.current) return;
+            if (err) console.error("friends-changes subscription error:", err);
+            console.log("friends-changes subscription status:", status);
+            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              console.warn(`friends-changes disconnected (${status}). Re-subscribing in 5s...`);
+              clearTimeout(globalTimeoutsRef.current.friends);
+              globalTimeoutsRef.current.friends = setTimeout(subscribeFriends, 5000);
+            }
+          });
+        globalChannelsRef.current.friendsChan = friendsChan;
+      };
+      subscribeFriends();
 
       // 6. Subscribe to DMs involving us
-      const dmChan = supabase
-        .channel('dm-changes')
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
-          const newDm = payload.new;
-          const currUserId = userRef.current?.id;
-          if (currUserId && (newDm.sender_id === currUserId || newDm.receiver_id === currUserId)) {
-            setDmMessages(prev => {
-              if (prev.some(d => d.id === newDm.id)) return prev;
-              return [...prev, newDm];
-            });
-          }
-        })
-        .subscribe((status, err) => {
-          if (err) console.error("dm-changes subscription error:", err);
-          console.log("dm-changes subscription status:", status);
-        });
-      globalChannelsRef.current.dmChan = dmChan;
+      let dmChan = null;
+      const subscribeDMs = () => {
+        if (globalCleanedUpRef.current) return;
+        if (dmChan) {
+          try { supabase.removeChannel(dmChan); } catch (e) {}
+        }
+
+        dmChan = supabase
+          .channel('dm-changes')
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
+            if (globalCleanedUpRef.current) return;
+            const newDm = payload.new;
+            const currUserId = userRef.current?.id;
+            if (currUserId && (newDm.sender_id === currUserId || newDm.receiver_id === currUserId)) {
+              setDmMessages(prev => {
+                if (prev.some(d => d.id === newDm.id)) return prev;
+                return [...prev, newDm];
+              });
+            }
+          })
+          .subscribe((status, err) => {
+            if (globalCleanedUpRef.current) return;
+            if (err) console.error("dm-changes subscription error:", err);
+            console.log("dm-changes subscription status:", status);
+            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              console.warn(`dm-changes disconnected (${status}). Re-subscribing in 5s...`);
+              clearTimeout(globalTimeoutsRef.current.dm);
+              globalTimeoutsRef.current.dm = setTimeout(subscribeDMs, 5000);
+            }
+          });
+        globalChannelsRef.current.dmChan = dmChan;
+      };
+      subscribeDMs();
 
       // 7. Subscribe to profiles updates
-      const profilesChan = supabase
-        .channel('profiles-changes')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
-          fetchAllProfiles();
-        })
-        .subscribe((status, err) => {
-          if (err) console.error("profiles-changes subscription error:", err);
-          console.log("profiles-changes subscription status:", status);
-        });
-      globalChannelsRef.current.profilesChan = profilesChan;
+      let profilesChan = null;
+      const subscribeProfiles = () => {
+        if (globalCleanedUpRef.current) return;
+        if (profilesChan) {
+          try { supabase.removeChannel(profilesChan); } catch (e) {}
+        }
 
+        profilesChan = supabase
+          .channel('profiles-changes')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
+            if (globalCleanedUpRef.current) return;
+            fetchAllProfiles();
+          })
+          .subscribe((status, err) => {
+            if (globalCleanedUpRef.current) return;
+            if (err) console.error("profiles-changes subscription error:", err);
+            console.log("profiles-changes subscription status:", status);
+            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              console.warn(`profiles-changes disconnected (${status}). Re-subscribing in 5s...`);
+              clearTimeout(globalTimeoutsRef.current.profiles);
+              globalTimeoutsRef.current.profiles = setTimeout(subscribeProfiles, 5000);
+            }
+          });
+        globalChannelsRef.current.profilesChan = profilesChan;
+      };
+      subscribeProfiles();
+
+      if (globalCleanedUpRef.current) return;
       setLoading(false);
     } catch (e) {
       console.error("Supabase init error, reverting to offline mode", e);
-      initLocalFallback();
+      if (!globalCleanedUpRef.current) {
+        initLocalFallback();
+      }
     }
   };
 
@@ -366,7 +471,8 @@ export const RealtimeSyncProvider = ({ children }) => {
     let retries = 5;
     
     while (retries > 0 && !profile) {
-      const { data, error } = await supabase
+      if (globalCleanedUpRef.current) return;
+      const { data } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', supabaseUser.id)
@@ -381,6 +487,8 @@ export const RealtimeSyncProvider = ({ children }) => {
         }
       }
     }
+
+    if (globalCleanedUpRef.current) return;
 
     if (!profile) {
       console.warn("Profile trigger pending. Attempting backup frontend insert...");
@@ -398,12 +506,16 @@ export const RealtimeSyncProvider = ({ children }) => {
         .select()
         .maybeSingle();
 
+      if (globalCleanedUpRef.current) return;
+
       if (!insertError && insertedProfile) {
         profile = insertedProfile;
       } else {
         console.error("Failed to insert fallback profile:", insertError);
       }
     }
+
+    if (globalCleanedUpRef.current) return;
 
     if (profile) {
       const activeUser = {
@@ -422,9 +534,14 @@ export const RealtimeSyncProvider = ({ children }) => {
         .eq('user_id', supabaseUser.id)
         .order('created_at', { ascending: false });
 
+      if (globalCleanedUpRef.current) return;
+
       await fetchFriendships(supabaseUser.id);
+      if (globalCleanedUpRef.current) return;
       await fetchDirectMessages(supabaseUser.id);
+      if (globalCleanedUpRef.current) return;
       await fetchAllProfiles();
+      if (globalCleanedUpRef.current) return;
 
       setStats({
         xp: profile.xp,
@@ -455,6 +572,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       .from('friends')
       .select('*')
       .or(`user_id_1.eq.${currUserId},user_id_2.eq.${currUserId}`);
+    if (globalCleanedUpRef.current) return;
     if (data) setFriendsList(data);
   };
 
@@ -465,6 +583,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       .select('*')
       .or(`sender_id.eq.${currUserId},receiver_id.eq.${currUserId}`)
       .order('created_at', { ascending: true });
+    if (globalCleanedUpRef.current) return;
     if (data) setDmMessages(data);
   };
 
@@ -473,6 +592,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     const { data } = await supabase
       .from('profiles')
       .select('id, username, avatar_color, xp');
+    if (globalCleanedUpRef.current) return;
     if (data) setAllProfiles(data);
   };
 
@@ -651,6 +771,9 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     // --- PROD SUPABASE SYNC LOGIC ---
+    let isCurrentSubscription = true;
+    let roomSyncChan = null;
+    let reconnectTimeout = null;
 
     // 1. Fetch Room State (Chats, Tasks, Whiteboard)
     const fetchInitialRoomData = async () => {
@@ -662,8 +785,11 @@ export const RealtimeSyncProvider = ({ children }) => {
         .order('created_at', { ascending: true })
         .limit(50);
       
+      if (!isCurrentSubscription) return;
+
       if (dbChats) {
         setChatMessages(dbChats.map(c => ({
+          id: c.id,
           sender: c.sender_name,
           text: c.text,
           timestamp: formatTimestamp(c.created_at)
@@ -677,6 +803,8 @@ export const RealtimeSyncProvider = ({ children }) => {
         .eq('room_id', activeRoomId)
         .order('created_at', { ascending: true });
       
+      if (!isCurrentSubscription) return;
+
       if (dbTasks) {
         setTasks(dbTasks.map(t => ({
           id: t.id,
@@ -692,6 +820,9 @@ export const RealtimeSyncProvider = ({ children }) => {
         .select('data_url')
         .eq('room_id', activeRoomId)
         .maybeSingle();
+
+      if (!isCurrentSubscription) return;
+
       if (dbBoard) {
         setWhiteboardData(dbBoard.data_url || '');
       } else {
@@ -700,6 +831,7 @@ export const RealtimeSyncProvider = ({ children }) => {
           room_id: activeRoomId,
           data_url: ''
         });
+        if (!isCurrentSubscription) return;
         setWhiteboardData('');
       }
     };
@@ -707,98 +839,121 @@ export const RealtimeSyncProvider = ({ children }) => {
     fetchInitialRoomData();
 
     // 2. Subscribe to all room-specific updates in a single multiplexed channel
-    const roomSyncChan = supabase.channel(`room-sync:${activeRoomId}`);
+    const subscribeRoom = () => {
+      if (!isCurrentSubscription) return;
+      if (roomSyncChan) {
+        try { supabase.removeChannel(roomSyncChan); } catch (e) {}
+      }
 
-    roomSyncChan
-      .on('postgres_changes', { 
-        event: 'INSERT', 
-        schema: 'public', 
-        table: 'messages', 
-        filter: `room_id=eq.${activeRoomId}` 
-      }, (payload) => {
-        const timestampVal = formatTimestamp(payload.new.created_at);
-        setChatMessages(prev => {
-          const hasOptimistic = prev.some(m => m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-'));
-          if (hasOptimistic) {
-            return prev.map(m => (m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-')) ? {
+      roomSyncChan = supabase.channel(`room-sync:${activeRoomId}`);
+
+      roomSyncChan
+        .on('postgres_changes', { 
+          event: 'INSERT', 
+          schema: 'public', 
+          table: 'messages', 
+          filter: `room_id=eq.${activeRoomId}` 
+        }, (payload) => {
+          if (!isCurrentSubscription) return;
+          const timestampVal = formatTimestamp(payload.new.created_at);
+          setChatMessages(prev => {
+            const hasOptimistic = prev.some(m => m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-'));
+            if (hasOptimistic) {
+              return prev.map(m => (m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-')) ? {
+                id: payload.new.id,
+                sender: payload.new.sender_name,
+                text: payload.new.text,
+                timestamp: timestampVal
+              } : m);
+            }
+            return [...prev, {
               id: payload.new.id,
               sender: payload.new.sender_name,
               text: payload.new.text,
               timestamp: timestampVal
-            } : m);
-          }
-          return [...prev, {
-            id: payload.new.id,
-            sender: payload.new.sender_name,
-            text: payload.new.text,
-            timestamp: timestampVal
-          }];
-        });
-      })
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'tasks', 
-        filter: `room_id=eq.${activeRoomId}` 
-      }, (payload) => {
-        if (payload.eventType === 'INSERT') {
-          setTasks(prev => {
-            if (prev.some(t => t.id === payload.new.id)) return prev;
-            const listWithoutTemp = prev.filter(t => t.text !== payload.new.text || !String(t.id).startsWith('temp-'));
-            return [...listWithoutTemp, {
-              id: payload.new.id,
-              text: payload.new.text,
-              completed: payload.new.completed,
-              user: payload.new.user_name
             }];
           });
-        } else if (payload.eventType === 'UPDATE') {
-          setTasks(prev => prev.map(t => t.id === payload.new.id ? {
-            ...t,
-            completed: payload.new.completed
-          } : t));
-        } else if (payload.eventType === 'DELETE') {
-          setTasks(prev => prev.filter(t => t.id !== payload.old.id));
-        }
-      })
-      .on('postgres_changes', { 
-        event: 'UPDATE', 
-        schema: 'public', 
-        table: 'whiteboards', 
-        filter: `room_id=eq.${activeRoomId}` 
-      }, (payload) => {
-        setWhiteboardData(payload.new.data_url || '');
-      })
-      .on('presence', { event: 'sync' }, () => {
-        const state = roomSyncChan.presenceState();
-        const list = Object.values(state).flat().map(p => ({
-          name: p.username || 'Scholar',
-          status: p.status || 'Joined 🚪',
-          avatarColor: p.avatar_color || '#a855f7',
-          xp: p.xp || 0
-        }));
-        setParticipants(list);
-      })
-      .subscribe(async (status, err) => {
-        if (err) console.error("roomSyncChan subscription error:", err);
-        console.log("roomSyncChan subscription status:", status);
-        if (status === 'SUBSCRIBED' && userRef.current) {
-          await roomSyncChan.track({
-            username: userRef.current.name,
-            status: 'Focusing ✍️',
-            avatar_color: userRef.current.avatarColor,
-            xp: statsRef.current.xp
-          });
-        }
-      });
+        })
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'tasks', 
+          filter: `room_id=eq.${activeRoomId}` 
+        }, (payload) => {
+          if (!isCurrentSubscription) return;
+          if (payload.eventType === 'INSERT') {
+            setTasks(prev => {
+              if (prev.some(t => t.id === payload.new.id)) return prev;
+              const listWithoutTemp = prev.filter(t => t.text !== payload.new.text || !String(t.id).startsWith('temp-'));
+              return [...listWithoutTemp, {
+                id: payload.new.id,
+                text: payload.new.text,
+                completed: payload.new.completed,
+                user: payload.new.user_name
+              }];
+            });
+          } else if (payload.eventType === 'UPDATE') {
+            setTasks(prev => prev.map(t => t.id === payload.new.id ? {
+              ...t,
+              completed: payload.new.completed
+            } : t));
+          } else if (payload.eventType === 'DELETE') {
+            setTasks(prev => prev.filter(t => t.id !== payload.old.id));
+          }
+        })
+        .on('postgres_changes', { 
+          event: 'UPDATE', 
+          schema: 'public', 
+          table: 'whiteboards', 
+          filter: `room_id=eq.${activeRoomId}` 
+        }, (payload) => {
+          if (!isCurrentSubscription) return;
+          setWhiteboardData(payload.new.data_url || '');
+        })
+        .on('presence', { event: 'sync' }, () => {
+          if (!isCurrentSubscription) return;
+          const state = roomSyncChan.presenceState();
+          const list = Object.values(state).flat().map(p => ({
+            name: p.username || 'Scholar',
+            status: p.status || 'Joined 🚪',
+            avatarColor: p.avatar_color || '#a855f7',
+            xp: p.xp || 0
+          }));
+          setParticipants(list);
+        })
+        .subscribe(async (status, err) => {
+          if (!isCurrentSubscription) return;
+          if (err) console.error("roomSyncChan subscription error:", err);
+          console.log("roomSyncChan subscription status:", status);
+          if (status === 'SUBSCRIBED' && userRef.current) {
+            await roomSyncChan.track({
+              username: userRef.current.name,
+              status: 'Focusing ✍️',
+              avatar_color: userRef.current.avatarColor,
+              xp: statsRef.current.xp
+            });
+          }
+          if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            if (isCurrentSubscription) {
+              console.warn(`Room subscription disconnected (${status}). Re-subscribing in 3s...`);
+              clearTimeout(reconnectTimeout);
+              reconnectTimeout = setTimeout(subscribeRoom, 3000);
+            }
+          }
+        });
 
-    channelRef.current = {
-      roomSyncChan
+      channelRef.current = {
+        roomSyncChan
+      };
     };
 
+    subscribeRoom();
+
     return () => {
-      if (supabase) {
-        supabase.removeChannel(roomSyncChan);
+      isCurrentSubscription = false;
+      clearTimeout(reconnectTimeout);
+      if (supabase && roomSyncChan) {
+        try { supabase.removeChannel(roomSyncChan); } catch (e) {}
       }
     };
 
@@ -895,7 +1050,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     const nextDuration = nextMode === 'focus' ? room.timer_duration : 300;
 
     // Only update if timer is running in local memory to prevent infinite loop races
-    if (timerState.isRunning) {
+    if (timerStateRef.current.isRunning) {
       await supabase
         .from('rooms')
         .update({
@@ -1030,14 +1185,14 @@ export const RealtimeSyncProvider = ({ children }) => {
 
   // --- Create Room ---
   const createRoom = async (name, description, category, tagsArray, timerMode, durationMinutes, isPrivate = false) => {
-    if (!user) return;
+    if (!userRef.current) return;
 
     // Check public rooms limit
     if (!isPrivate) {
       const publicCreatedRooms = rooms.filter(r => {
         const isCreator = isSupabaseConfigured 
-          ? r.creator_id === user.id 
-          : r.creator === user.name;
+          ? r.creator_id === userRef.current.id 
+          : r.creator === userRef.current.name;
         const isRoomPrivate = r.is_private || false;
         return isCreator && !isRoomPrivate;
       });
@@ -1058,7 +1213,7 @@ export const RealtimeSyncProvider = ({ children }) => {
         description,
         category,
         tags,
-        creator: user.name,
+        creator: userRef.current.name,
         timerMode,
         timerDuration: durationSeconds,
         bgImage,
@@ -1084,7 +1239,7 @@ export const RealtimeSyncProvider = ({ children }) => {
         description,
         category,
         tags,
-        creator_id: user.id,
+        creator_id: userRef.current.id,
         timer_mode: timerMode,
         timer_duration: durationSeconds,
         timer_paused_seconds_left: durationSeconds,
@@ -1475,20 +1630,20 @@ export const RealtimeSyncProvider = ({ children }) => {
 
   // --- Social Systems: Friends & DMs ---
   const sendFriendRequest = async (targetUsername) => {
-    if (!user) return;
+    if (!userRef.current) return;
 
     if (!isSupabaseConfigured) {
       // Local fallback mock
       const target = allProfiles.find(p => p.username.toLowerCase() === targetUsername.toLowerCase());
       if (!target) throw new Error("Scholar not found.");
-      if (target.id === user.id) throw new Error("You cannot add yourself.");
+      if (target.id === userRef.current.id) throw new Error("You cannot add yourself.");
       
       const newRequest = {
         id: 'req-' + Date.now(),
-        user_id_1: user.id < target.id ? user.id : target.id,
-        user_id_2: user.id < target.id ? target.id : user.id,
+        user_id_1: userRef.current.id < target.id ? userRef.current.id : target.id,
+        user_id_2: userRef.current.id < target.id ? target.id : userRef.current.id,
         status: 'pending',
-        sender_id: user.id
+        sender_id: userRef.current.id
       };
       setFriendsList(prev => {
         const next = [...prev, newRequest];
@@ -1510,28 +1665,28 @@ export const RealtimeSyncProvider = ({ children }) => {
     if (profileErr || !targetProfile) {
       throw new Error("Scholar not found.");
     }
-    if (targetProfile.id === user.id) {
+    if (targetProfile.id === userRef.current.id) {
       throw new Error("You cannot add yourself.");
     }
 
     // 2. Check duplicate
     const exists = friendsList.some(f => 
-      (f.user_id_1 === user.id && f.user_id_2 === targetProfile.id) ||
-      (f.user_id_1 === targetProfile.id && f.user_id_2 === user.id)
+      (f.user_id_1 === userRef.current.id && f.user_id_2 === targetProfile.id) ||
+      (f.user_id_1 === targetProfile.id && f.user_id_2 === userRef.current.id)
     );
     if (exists) {
       throw new Error("Friend request already sent or accepted.");
     }
 
     // 3. Insert
-    const [id1, id2] = user.id < targetProfile.id ? [user.id, targetProfile.id] : [targetProfile.id, user.id];
+    const [id1, id2] = userRef.current.id < targetProfile.id ? [userRef.current.id, targetProfile.id] : [targetProfile.id, userRef.current.id];
     const { error: insertErr } = await supabase
       .from('friends')
       .insert({
         user_id_1: id1,
         user_id_2: id2,
         status: 'pending',
-        sender_id: user.id
+        sender_id: userRef.current.id
       });
 
     if (insertErr) throw insertErr;
@@ -1576,42 +1731,46 @@ export const RealtimeSyncProvider = ({ children }) => {
   };
 
   const sendDirectMessage = async (receiverId, text, isInvite = false, roomId = null) => {
-    if (!user) return;
+    if (!userRef.current) return;
+
+    const tempId = 'temp-dm-' + Date.now();
+    const tempDm = {
+      id: tempId,
+      sender_id: userRef.current.id,
+      sender_name: userRef.current.name,
+      receiver_id: receiverId,
+      text,
+      is_invite: isInvite,
+      room_id: roomId,
+      created_at: new Date().toISOString()
+    };
+    setDmMessages(prev => [...prev, tempDm]);
 
     if (!isSupabaseConfigured) {
-      // Local DM fallback
-      const newDm = {
-        id: 'dm-' + Date.now(),
-        sender_id: user.id,
-        sender_name: user.name,
-        receiver_id: receiverId,
-        text,
-        is_invite: isInvite,
-        room_id: roomId,
-        created_at: new Date().toISOString()
-      };
-      setDmMessages(prev => {
-        const next = [...prev, newDm];
-        localStorage.setItem('study_dms', JSON.stringify(next));
-        localBroadcastChannelRef.current?.postMessage({ type: 'DM_MSG', payload: newDm });
-        return next;
-      });
+      localStorage.setItem('study_dms', JSON.stringify([...dmMessages, tempDm]));
+      localBroadcastChannelRef.current?.postMessage({ type: 'DM_MSG', payload: tempDm });
       return;
     }
 
-    // Cloud Mode
-    const { error } = await supabase
-      .from('direct_messages')
-      .insert({
-        sender_id: user.id,
-        sender_name: user.name,
-        receiver_id: receiverId,
-        text,
-        is_invite: isInvite,
-        room_id: roomId
-      });
+    try {
+      const { error } = await supabase
+        .from('direct_messages')
+        .insert({
+          sender_id: userRef.current.id,
+          sender_name: userRef.current.name,
+          receiver_id: receiverId,
+          text,
+          is_invite: isInvite,
+          room_id: roomId
+        });
 
-    if (error) throw error;
+      if (error) throw error;
+    } catch (err) {
+      // Revert optimistic DM
+      setDmMessages(prev => prev.filter(d => d.id !== tempId));
+      console.error("Error sending DM:", err);
+      alert("Failed to send DM: " + (err.message || err));
+    }
   };
 
   return (
