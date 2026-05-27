@@ -2,12 +2,13 @@ import React, { useState } from 'react';
 import { useRealtimeSync } from '../context/RealtimeSyncContext';
 import { 
   Search, Plus, Users, Clock, Hash, Trophy, Calendar, 
-  Sparkles, Award, ArrowRight, BookOpen, Music, CheckCircle2 
+  Sparkles, Award, ArrowRight, BookOpen, Music, CheckCircle2, UserPlus, MessageSquare, Send
 } from 'lucide-react';
 
 export default function Dashboard() {
   const { 
-    user, rooms, createRoom, deleteRoom, joinRoom, stats, addManualSession, allParticipants, supabase
+    user, rooms, createRoom, deleteRoom, joinRoom, stats, addManualSession, allParticipants, supabase,
+    friendsList, dmMessages, allProfiles, sendFriendRequest, acceptFriendRequest, cancelOrRemoveFriend, sendDirectMessage, activeRoomId
   } = useRealtimeSync();
 
   const [search, setSearch] = useState('');
@@ -32,6 +33,13 @@ export default function Dashboard() {
   // Join Private Room states
   const [joinPrivateId, setJoinPrivateId] = useState('');
   const [joinPrivateError, setJoinPrivateError] = useState('');
+
+  // Social Panel states
+  const [socialSearch, setSocialSearch] = useState('');
+  const [socialError, setSocialError] = useState('');
+  const [socialSuccess, setSocialSuccess] = useState('');
+  const [activeDmFriend, setActiveDmFriend] = useState(null);
+  const [dmTextInput, setDmTextInput] = useState('');
 
   // Extract categories
   const categories = ['All', ...new Set(rooms.map(r => r.category))];
@@ -376,6 +384,131 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Social & Friends Card */}
+        <div className="glass-panel" style={{ padding: '24px' }}>
+          <h3 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+            <Users size={18} style={{ color: 'var(--color-primary)' }} /> Scholars Network
+          </h3>
+
+          {/* Add Friend Form */}
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            setSocialError('');
+            setSocialSuccess('');
+            try {
+              await sendFriendRequest(socialSearch.trim());
+              setSocialSuccess(`Request sent to "${socialSearch.trim()}"!`);
+              setSocialSearch('');
+            } catch (err) {
+              setSocialError(err.message || 'Error sending request');
+            }
+          }} style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+            <input
+              type="text"
+              className="form-control"
+              placeholder="Enter scholar username..."
+              value={socialSearch}
+              onChange={(e) => setSocialSearch(e.target.value)}
+              style={{ flex: 1, fontSize: '0.85rem', padding: '8px 12px' }}
+              required
+            />
+            <button type="submit" className="btn btn-secondary" style={{ padding: '0 12px', display: 'flex', alignItems: 'center', fontSize: '0.85rem' }} title="Send Friend Request">
+              Add Friend
+            </button>
+          </form>
+          {socialError && <div style={{ fontSize: '0.8rem', color: 'var(--color-accent)', marginBottom: '12px' }}>⚠️ {socialError}</div>}
+          {socialSuccess && <div style={{ fontSize: '0.8rem', color: 'var(--color-success)', marginBottom: '12px' }}>✓ {socialSuccess}</div>}
+
+          {/* Pending Incoming/Outgoing Requests */}
+          {(() => {
+            const pendingIncoming = friendsList.filter(f => f.status === 'pending' && f.sender_id !== user.id);
+            const pendingOutgoing = friendsList.filter(f => f.status === 'pending' && f.sender_id === user.id);
+
+            if (pendingIncoming.length === 0 && pendingOutgoing.length === 0) return null;
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px', borderBottom: '1px solid rgba(255,255,255,0.04)', paddingBottom: '16px' }}>
+                {pendingIncoming.map(req => {
+                  const sender = allProfiles.find(p => p.id === req.sender_id) || { username: 'Unknown' };
+                  return (
+                    <div key={req.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(168, 85, 247, 0.05)', padding: '8px 12px', borderRadius: '8px', border: '1px solid rgba(168,85,247,0.15)', gap: '8px' }}>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 500 }}>{sender.username} wants to add you</span>
+                      <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+                        <button type="button" className="btn btn-primary" onClick={() => acceptFriendRequest(req.id)} style={{ padding: '4px 8px', fontSize: '0.75rem' }} title="Accept">
+                          Accept
+                        </button>
+                        <button type="button" className="btn btn-secondary" onClick={() => cancelOrRemoveFriend(req.id)} style={{ padding: '4px 8px', fontSize: '0.75rem', color: 'var(--color-accent)' }} title="Decline">
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {pendingOutgoing.map(req => {
+                  const receiverId = req.user_id_1 === user.id ? req.user_id_2 : req.user_id_1;
+                  const receiver = allProfiles.find(p => p.id === receiverId) || { username: 'Unknown' };
+                  return (
+                    <div key={req.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255, 255, 255, 0.02)', padding: '6px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.04)' }}>
+                      <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Pending to: {receiver.username}</span>
+                      <button type="button" className="btn btn-icon-only" onClick={() => cancelOrRemoveFriend(req.id)} style={{ padding: '4px', fontSize: '0.75rem', color: 'var(--color-accent)', background: 'none', border: 'none', cursor: 'pointer' }} title="Cancel Request">
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
+          {/* Friends List */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '220px', overflowY: 'auto' }}>
+            {(() => {
+              const friends = friendsList.filter(f => f.status === 'accepted').map(f => {
+                const friendId = f.user_id_1 === user.id ? f.user_id_2 : f.user_id_1;
+                const profile = allProfiles.find(p => p.id === friendId) || { id: friendId, username: 'Unknown Scholar', avatar_color: '#a855f7', xp: 0 };
+                return { friendshipId: f.id, ...profile };
+              });
+
+              if (friends.length === 0) {
+                return <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', textAlign: 'center', padding: '10px 0' }}>No friends added yet. Add scholars above!</div>;
+              }
+
+              return friends.map(friend => (
+                <div key={friend.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.04)', borderRadius: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ display: 'inline-flex', width: '8px', height: '8px', borderRadius: '50%', background: friend.avatar_color || '#a855f7' }}></span>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 500 }}>{friend.username}</span>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>({friend.xp} XP)</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button 
+                      type="button"
+                      className="btn btn-secondary" 
+                      onClick={() => setActiveDmFriend(friend)} 
+                      style={{ padding: '4px 8px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(255,255,255,0.02)' }}
+                    >
+                      <MessageSquare size={12} /> Chat
+                    </button>
+                    <button 
+                      type="button"
+                      className="btn btn-icon-only" 
+                      onClick={() => {
+                        if (confirm(`Remove ${friend.username} from friends?`)) {
+                          cancelOrRemoveFriend(friend.friendshipId);
+                        }
+                      }} 
+                      style={{ padding: '4px', color: 'var(--color-accent)', background: 'none', border: 'none', cursor: 'pointer' }}
+                      title="Unfriend"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ));
+            })()}
+          </div>
+        </div>
+
         {/* Log Manual Activity Widget */}
         <div className="glass-panel" style={{ padding: '24px' }}>
           <h3 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
@@ -603,6 +736,149 @@ export default function Dashboard() {
                 </button>
               </div>
 
+            </form>
+          </div>
+        </div>
+      )}
+      {/* DIRECT MESSAGES MODAL */}
+      {activeDmFriend && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel-glow" style={{ border: '1px solid rgba(168, 85, 247, 0.3)', width: '100%', maxWidth: '480px', padding: '30px' }}>
+            <button className="modal-close" onClick={() => setActiveDmFriend(null)}>×</button>
+            
+            <h3 style={{ fontSize: '1.25rem', fontWeight: 700, fontFamily: 'var(--font-display)', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px' }}>
+              Chat with {activeDmFriend.username}
+            </h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginBottom: '20px' }}>
+              Send private messages or share study rooms.
+            </p>
+
+            {/* DMs Chat History */}
+            <div style={{ 
+              height: '250px', 
+              overflowY: 'auto', 
+              background: 'rgba(0,0,0,0.2)', 
+              borderRadius: '12px', 
+              padding: '16px', 
+              display: 'flex', 
+              flexDirection: 'column', 
+              gap: '12px',
+              border: '1px solid rgba(255,255,255,0.04)',
+              marginBottom: '16px'
+            }}>
+              {(() => {
+                const thread = dmMessages.filter(m => 
+                  (m.sender_id === user.id && m.receiver_id === activeDmFriend.id) ||
+                  (m.sender_id === activeDmFriend.id && m.receiver_id === user.id)
+                );
+
+                if (thread.length === 0) {
+                  return <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', textAlign: 'center', margin: 'auto' }}>No messages yet. Send a greeting!</div>;
+                }
+
+                return thread.map(msg => {
+                  const isMe = msg.sender_id === user.id;
+                  
+                  if (msg.is_invite) {
+                    // Render Room Invite Card in DMs
+                    const inviteRoom = rooms.find(r => r.id === msg.room_id) || { name: 'Shared Den', category: 'General' };
+                    return (
+                      <div 
+                        key={msg.id} 
+                        style={{ 
+                          alignSelf: 'center', 
+                          background: 'rgba(168, 85, 247, 0.1)', 
+                          border: '1px solid rgba(168, 85, 247, 0.3)',
+                          borderRadius: '12px', 
+                          padding: '12px 16px', 
+                          maxWidth: '85%', 
+                          textAlign: 'center' 
+                        }}
+                      >
+                        <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-primary)', display: 'block', marginBottom: '4px', fontWeight: 600 }}>
+                          🎓 Den Invitation
+                        </span>
+                        <strong style={{ fontSize: '0.9rem', display: 'block', marginBottom: '8px' }}>{inviteRoom.name}</strong>
+                        <button 
+                          className="btn btn-primary" 
+                          onClick={() => {
+                            joinRoom(msg.room_id);
+                            setActiveDmFriend(null);
+                          }}
+                          style={{ padding: '4px 12px', fontSize: '0.75rem', margin: '0 auto' }}
+                        >
+                          Join Study Room
+                        </button>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div 
+                      key={msg.id} 
+                      style={{ 
+                        alignSelf: isMe ? 'flex-end' : 'flex-start',
+                        background: isMe ? 'var(--color-primary-glow)' : 'rgba(255,255,255,0.03)',
+                        border: isMe ? '1px solid rgba(168, 85, 247, 0.25)' : '1px solid rgba(255,255,255,0.06)',
+                        borderRadius: isMe ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
+                        padding: '8px 12px',
+                        maxWidth: '75%',
+                        fontSize: '0.85rem',
+                        lineBreak: 'anywhere'
+                      }}
+                    >
+                      <div style={{ color: isMe ? 'var(--color-primary)' : 'var(--color-secondary)', fontSize: '0.7rem', fontWeight: 600, marginBottom: '2px' }}>
+                        {isMe ? 'You' : msg.sender_name}
+                      </div>
+                      <div>{msg.text}</div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+
+            {/* Form actions */}
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              if (!dmTextInput.trim()) return;
+              try {
+                await sendDirectMessage(activeDmFriend.id, dmTextInput.trim());
+                setDmTextInput('');
+              } catch (err) {
+                console.error("Error sending DM:", err);
+              }
+            }} style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                className="form-control"
+                placeholder="Type your message..."
+                value={dmTextInput}
+                onChange={(e) => setDmTextInput(e.target.value)}
+                style={{ flex: 1, fontSize: '0.85rem' }}
+              />
+              
+              {/* Share Active Den Button */}
+              {activeRoomId && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={async () => {
+                    try {
+                      await sendDirectMessage(activeDmFriend.id, `Inviting you to study!`, true, activeRoomId);
+                    } catch (err) {
+                      console.error(err);
+                    }
+                  }}
+                  style={{ padding: '0 12px', background: 'rgba(6,182,212,0.1)', borderColor: 'rgba(6,182,212,0.3)', color: 'var(--color-secondary)', fontSize: '0.85rem' }}
+                  title="Invite to your current study room"
+                >
+                  Invite
+                </button>
+              )}
+
+              <button type="submit" className="btn btn-primary" style={{ padding: '0 16px' }}>
+                <Send size={16} />
+              </button>
             </form>
           </div>
         </div>

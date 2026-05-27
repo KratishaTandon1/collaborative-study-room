@@ -95,6 +95,9 @@ export const RealtimeSyncProvider = ({ children }) => {
   const [authError, setAuthError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [whiteboardData, setWhiteboardData] = useState('');
+  const [friendsList, setFriendsList] = useState([]);
+  const [dmMessages, setDmMessages] = useState([]);
+  const [allProfiles, setAllProfiles] = useState([]);
 
   const [stats, setStats] = useState({
     xp: 320,
@@ -153,6 +156,14 @@ export const RealtimeSyncProvider = ({ children }) => {
       }
     };
 
+    setAllProfiles([
+      { id: 'mock-1', username: 'Sarah', avatar_color: '#a78bfa', xp: 450 },
+      { id: 'mock-2', username: 'David', avatar_color: '#f472b6', xp: 210 },
+      { id: 'mock-3', username: 'Emily', avatar_color: '#34d399', xp: 820 }
+    ]);
+    setFriendsList([]);
+    setDmMessages([]);
+
     setLoading(false);
   };
 
@@ -199,6 +210,34 @@ export const RealtimeSyncProvider = ({ children }) => {
         })
         .subscribe();
 
+      // 5. Subscribe to friends updates
+      supabase
+        .channel('friends-changes')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
+          supabase.auth.getSession().then(({ data }) => {
+            const userId = data?.session?.user?.id;
+            if (userId) fetchFriendships(userId);
+          });
+        })
+        .subscribe();
+
+      // 6. Subscribe to DMs involving us
+      supabase
+        .channel('dm-changes')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
+          const newDm = payload.new;
+          supabase.auth.getSession().then(({ data }) => {
+            const currUserId = data?.session?.user?.id;
+            if (currUserId && (newDm.sender_id === currUserId || newDm.receiver_id === currUserId)) {
+              setDmMessages(prev => {
+                if (prev.some(d => d.id === newDm.id)) return prev;
+                return [...prev, newDm];
+              });
+            }
+          });
+        })
+        .subscribe();
+
       setLoading(false);
     } catch (e) {
       console.error("Supabase init error, reverting to offline mode", e);
@@ -231,6 +270,10 @@ export const RealtimeSyncProvider = ({ children }) => {
         .eq('user_id', supabaseUser.id)
         .order('created_at', { ascending: false });
 
+      await fetchFriendships(supabaseUser.id);
+      await fetchDirectMessages(supabaseUser.id);
+      await fetchAllProfiles();
+
       setStats({
         xp: profile.xp,
         totalMinutes: profile.total_minutes,
@@ -252,6 +295,33 @@ export const RealtimeSyncProvider = ({ children }) => {
         })) : []
       });
     }
+  };
+
+  const fetchFriendships = async (currUserId) => {
+    if (!isSupabaseConfigured) return;
+    const { data } = await supabase
+      .from('friends')
+      .select('*')
+      .or(`user_id_1.eq.${currUserId},user_id_2.eq.${currUserId}`);
+    if (data) setFriendsList(data);
+  };
+
+  const fetchDirectMessages = async (currUserId) => {
+    if (!isSupabaseConfigured) return;
+    const { data } = await supabase
+      .from('direct_messages')
+      .select('*')
+      .or(`sender_id.eq.${currUserId},receiver_id.eq.${currUserId}`)
+      .order('created_at', { ascending: true });
+    if (data) setDmMessages(data);
+  };
+
+  const fetchAllProfiles = async () => {
+    if (!isSupabaseConfigured) return;
+    const { data } = await supabase
+      .from('profiles')
+      .select('id, username, avatar_color, xp');
+    if (data) setAllProfiles(data);
   };
 
   // --- Auth Actions ---
@@ -1148,6 +1218,127 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
   };
 
+  // --- Social Systems: Friends & DMs ---
+  const sendFriendRequest = async (targetUsername) => {
+    if (!user) return;
+
+    if (!isSupabaseConfigured) {
+      // Local fallback mock
+      const target = allProfiles.find(p => p.username.toLowerCase() === targetUsername.toLowerCase());
+      if (!target) throw new Error("Scholar not found.");
+      if (target.id === user.id) throw new Error("You cannot add yourself.");
+      
+      const newRequest = {
+        id: 'req-' + Date.now(),
+        user_id_1: user.id < target.id ? user.id : target.id,
+        user_id_2: user.id < target.id ? target.id : user.id,
+        status: 'pending',
+        sender_id: user.id
+      };
+      setFriendsList(prev => [...prev, newRequest]);
+      return;
+    }
+
+    // Cloud Mode
+    // 1. Find profile
+    const { data: targetProfile, error: profileErr } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('username', targetUsername)
+      .maybeSingle();
+
+    if (profileErr || !targetProfile) {
+      throw new Error("Scholar not found.");
+    }
+    if (targetProfile.id === user.id) {
+      throw new Error("You cannot add yourself.");
+    }
+
+    // 2. Check duplicate
+    const exists = friendsList.some(f => 
+      (f.user_id_1 === user.id && f.user_id_2 === targetProfile.id) ||
+      (f.user_id_1 === targetProfile.id && f.user_id_2 === user.id)
+    );
+    if (exists) {
+      throw new Error("Friend request already sent or accepted.");
+    }
+
+    // 3. Insert
+    const [id1, id2] = user.id < targetProfile.id ? [user.id, targetProfile.id] : [targetProfile.id, user.id];
+    const { error: insertErr } = await supabase
+      .from('friends')
+      .insert({
+        user_id_1: id1,
+        user_id_2: id2,
+        status: 'pending',
+        sender_id: user.id
+      });
+
+    if (insertErr) throw insertErr;
+  };
+
+  const acceptFriendRequest = async (requestId) => {
+    if (!isSupabaseConfigured) {
+      setFriendsList(prev => prev.map(f => f.id === requestId ? { ...f, status: 'accepted' } : f));
+      return;
+    }
+
+    const { error } = await supabase
+      .from('friends')
+      .update({ status: 'accepted' })
+      .eq('id', requestId);
+
+    if (error) throw error;
+  };
+
+  const cancelOrRemoveFriend = async (requestId) => {
+    if (!isSupabaseConfigured) {
+      setFriendsList(prev => prev.filter(f => f.id !== requestId));
+      return;
+    }
+
+    const { error } = await supabase
+      .from('friends')
+      .delete()
+      .eq('id', requestId);
+
+    if (error) throw error;
+  };
+
+  const sendDirectMessage = async (receiverId, text, isInvite = false, roomId = null) => {
+    if (!user) return;
+
+    if (!isSupabaseConfigured) {
+      // Local DM fallback
+      const newDm = {
+        id: 'dm-' + Date.now(),
+        sender_id: user.id,
+        sender_name: user.name,
+        receiver_id: receiverId,
+        text,
+        is_invite: isInvite,
+        room_id: roomId,
+        created_at: new Date().toISOString()
+      };
+      setDmMessages(prev => [...prev, newDm]);
+      return;
+    }
+
+    // Cloud Mode
+    const { error } = await supabase
+      .from('direct_messages')
+      .insert({
+        sender_id: user.id,
+        sender_name: user.name,
+        receiver_id: receiverId,
+        text,
+        is_invite: isInvite,
+        room_id: roomId
+      });
+
+    if (error) throw error;
+  };
+
   return (
     <RealtimeSyncContext.Provider
       value={{
@@ -1180,7 +1371,14 @@ export const RealtimeSyncProvider = ({ children }) => {
         resetTimer,
         setTimerMode,
         stats,
-        addManualSession
+        addManualSession,
+        friendsList,
+        dmMessages,
+        allProfiles,
+        sendFriendRequest,
+        acceptFriendRequest,
+        cancelOrRemoveFriend,
+        sendDirectMessage
       }}
     >
       {children}

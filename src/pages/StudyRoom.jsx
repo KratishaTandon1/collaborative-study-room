@@ -25,10 +25,48 @@ export default function StudyRoom() {
     timerState,
     toggleTimer,
     resetTimer,
-    setTimerMode
+    setTimerMode,
+    friendsList,
+    allProfiles,
+    sendFriendRequest
   } = useRealtimeSync();
 
   const currentRoom = rooms.find(r => r.id === activeRoomId);
+
+  const getFriendshipState = (participantName) => {
+    if (!user || participantName === user.name) return 'me';
+    
+    const friendProfile = allProfiles.find(prof => prof.username === participantName);
+    if (!friendProfile) return 'not_found';
+    
+    const friendship = friendsList.find(f => 
+      (f.user_id_1 === user.id && f.user_id_2 === friendProfile.id) ||
+      (f.user_id_1 === friendProfile.id && f.user_id_2 === user.id)
+    );
+    
+    if (!friendship) return 'none';
+    return friendship.status;
+  };
+
+  const handleParticipantClick = async (pName) => {
+    const state = getFriendshipState(pName);
+    if (state === 'me') return;
+    if (state === 'accepted') {
+      alert(`${pName} is already your friend!`);
+      return;
+    }
+    if (state === 'pending') {
+      alert(`A friend request with ${pName} is already pending.`);
+      return;
+    }
+    
+    try {
+      await sendFriendRequest(pName);
+      alert(`Friend request sent to ${pName}!`);
+    } catch (err) {
+      alert(err.message || "Could not send friend request.");
+    }
+  };
 
   if (!currentRoom) {
     return (
@@ -494,29 +532,42 @@ export default function StudyRoom() {
                   <Users size={16} style={{ color: 'var(--color-secondary)' }} /> Online in Den ({participants.length})
                 </h3>
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', maxHeight: '90px', overflowY: 'auto' }}>
-                  {participants.map((p, idx) => (
-                    <div 
-                      key={idx} 
-                      className="user-badge-nav" 
-                      style={{ 
-                        padding: '4px 10px', 
-                        fontSize: '0.8rem',
-                        borderColor: 'rgba(255,255,255,0.06)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px'
-                      }}
-                      title={`${p.name} - ${p.status}`}
-                    >
-                      <span style={{ 
-                        width: '8px', 
-                        height: '8px', 
-                        borderRadius: '50%', 
-                        background: p.avatarColor || 'var(--color-primary)' 
-                      }}></span>
-                      <span><strong>{p.name}</strong> ({p.status})</span>
-                    </div>
-                  ))}
+                  {participants.map((p, idx) => {
+                    const state = getFriendshipState(p.name);
+                    const titleText = state === 'me' ? 'You' :
+                                      state === 'accepted' ? `${p.name} (Friend ✓)` :
+                                      state === 'pending' ? `${p.name} (Pending Request)` :
+                                      `Click to add ${p.name} as friend`;
+                    return (
+                      <div 
+                        key={idx} 
+                        className="user-badge-nav" 
+                        onClick={() => handleParticipantClick(p.name)}
+                        style={{ 
+                          padding: '4px 10px', 
+                          fontSize: '0.8rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          cursor: state === 'me' ? 'default' : 'pointer',
+                          background: state === 'accepted' ? 'rgba(16, 185, 129, 0.08)' : 
+                                      state === 'pending' ? 'rgba(245, 158, 11, 0.08)' : 'rgba(255, 255, 255, 0.02)',
+                          borderColor: state === 'accepted' ? 'rgba(16, 185, 129, 0.25)' : 
+                                       state === 'pending' ? 'rgba(245, 158, 11, 0.25)' : 'rgba(255, 255, 255, 0.06)',
+                          transition: 'all 0.2s'
+                        }}
+                        title={titleText}
+                      >
+                        <span style={{ 
+                          width: '8px', 
+                          height: '8px', 
+                          borderRadius: '50%', 
+                          background: p.avatarColor || 'var(--color-primary)' 
+                        }}></span>
+                        <span><strong>{p.name}</strong> ({p.status})</span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
