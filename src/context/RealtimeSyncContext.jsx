@@ -146,27 +146,19 @@ export const RealtimeSyncProvider = ({ children }) => {
     sessionHistory: []
   });
 
-  const channelRef = useRef(null);
   const localBroadcastChannelRef = useRef(null);
   const timerIntervalRef = useRef(null);
-  const globalChannelsRef = useRef({
-    roomsChan: null,
-    friendsChan: null,
-    dmChan: null,
-    profilesChan: null
-  });
+  const globalChanRef = useRef(null);
+  const globalChanStatusRef = useRef('none');
+  const roomSyncChanRef = useRef(null);
+  const roomSyncChanStatusRef = useRef('none');
+  const activeRoomIdRef = useRef(activeRoomId);
   const authSubscriptionRef = useRef(null);
   const userRef = useRef(user);
   const statsRef = useRef(stats);
   const timerStateRef = useRef(timerState);
 
   const globalCleanedUpRef = useRef(false);
-  const globalTimeoutsRef = useRef({
-    rooms: null,
-    friends: null,
-    dm: null,
-    profiles: null
-  });
 
   useEffect(() => {
     userRef.current = user;
@@ -179,6 +171,10 @@ export const RealtimeSyncProvider = ({ children }) => {
   useEffect(() => {
     timerStateRef.current = timerState;
   }, [timerState]);
+
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
 
   // =================================================================
   // HYBRID INIT & STATE ROUTING
@@ -194,24 +190,13 @@ export const RealtimeSyncProvider = ({ children }) => {
 
     return () => {
       globalCleanedUpRef.current = true;
-      clearTimeout(globalTimeoutsRef.current.rooms);
-      clearTimeout(globalTimeoutsRef.current.friends);
-      clearTimeout(globalTimeoutsRef.current.dm);
-      clearTimeout(globalTimeoutsRef.current.profiles);
 
       if (isSupabaseConfigured && supabase) {
-        const { roomsChan, friendsChan, dmChan, profilesChan } = globalChannelsRef.current;
-        if (roomsChan) {
-          try { supabase.removeChannel(roomsChan); } catch (e) {}
+        if (globalChanRef.current) {
+          try { supabase.removeChannel(globalChanRef.current); } catch (e) {}
         }
-        if (friendsChan) {
-          try { supabase.removeChannel(friendsChan); } catch (e) {}
-        }
-        if (dmChan) {
-          try { supabase.removeChannel(dmChan); } catch (e) {}
-        }
-        if (profilesChan) {
-          try { supabase.removeChannel(profilesChan); } catch (e) {}
+        if (roomSyncChanRef.current) {
+          try { supabase.removeChannel(roomSyncChanRef.current); } catch (e) {}
         }
         if (authSubscriptionRef.current) {
           try { authSubscriptionRef.current.unsubscribe(); } catch (e) {}
@@ -227,6 +212,64 @@ export const RealtimeSyncProvider = ({ children }) => {
       window.history.pushState(null, '', '/');
     }
   }, [activeRoomId]);
+
+  // --- CONNECTION HEALTH MONITOR & REACTIVATION LIFECYCLE ---
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    // 1. Periodic health check every 8 seconds
+    const healthCheckInterval = setInterval(() => {
+      if (globalCleanedUpRef.current) return;
+
+      const globalStatus = globalChanStatusRef.current;
+      console.log(`[HEALTHCHECK] Global connection status: ${globalStatus}`);
+      if (globalStatus !== 'SUBSCRIBED' && globalStatus !== 'joining') {
+        console.warn(`[HEALTHCHECK] Global connection is not active (${globalStatus}). Recovering channel...`);
+        subscribeGlobalChan();
+      }
+
+      const activeRoom = activeRoomIdRef.current;
+      if (activeRoom) {
+        const roomStatus = roomSyncChanStatusRef.current;
+        console.log(`[HEALTHCHECK] Room ${activeRoom} connection status: ${roomStatus}`);
+        if (roomStatus !== 'SUBSCRIBED' && roomStatus !== 'joining') {
+          console.warn(`[HEALTHCHECK] Room channel is not active (${roomStatus}). Recovering channel...`);
+          subscribeRoomChan(activeRoom);
+        }
+      }
+    }, 8000);
+
+    // 2. Reactivate on focus or visibility change
+    const handleReactivation = () => {
+      if (globalCleanedUpRef.current) return;
+      console.log("[REACTIVATION] Tab became active. Checking connection health...");
+
+      if (globalChanStatusRef.current !== 'SUBSCRIBED') {
+        console.log("[REACTIVATION] Global channel is not active. Recovering...");
+        subscribeGlobalChan();
+      }
+
+      const activeRoom = activeRoomIdRef.current;
+      if (activeRoom && roomSyncChanStatusRef.current !== 'SUBSCRIBED') {
+        console.log("[REACTIVATION] Room channel is not active. Recovering...");
+        subscribeRoomChan(activeRoom);
+      }
+    };
+
+    window.addEventListener('focus', handleReactivation);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        handleReactivation();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(healthCheckInterval);
+      window.removeEventListener('focus', handleReactivation);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   // --- LOCAL FALLBACK MODE ---
   const initLocalFallback = () => {
@@ -283,6 +326,288 @@ export const RealtimeSyncProvider = ({ children }) => {
     setLoading(false);
   };
 
+  // --- REAL-TIME SUBSCRIPTION FUNCTIONS (SELF-HEALING & MULTIPLEXED) ---
+  const subscribeGlobalChan = () => {
+    if (!isSupabaseConfigured || !supabase || globalCleanedUpRef.current) return;
+
+    if (globalChanRef.current) {
+      try {
+        supabase.removeChannel(globalChanRef.current);
+      } catch (e) {
+        console.warn("Error removing existing global channel:", e);
+      }
+      globalChanRef.current = null;
+    }
+
+    const chan = supabase.channel('global-changes');
+
+    chan
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
+        if (globalCleanedUpRef.current) return;
+        if (payload.eventType === 'INSERT') {
+          setRooms(prev => {
+            const normalized = normalizeRoom(payload.new);
+            if (prev.some(r => r.id === normalized.id)) return prev;
+            return [...prev, normalized];
+          });
+        } else if (payload.eventType === 'UPDATE') {
+          setRooms(prev => prev.map(r => r.id === payload.new.id ? normalizeRoom(payload.new) : r));
+        } else if (payload.eventType === 'DELETE') {
+          setRooms(prev => prev.filter(r => r.id !== payload.old.id));
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
+        if (globalCleanedUpRef.current) return;
+        const userId = userRef.current?.id;
+        if (userId) fetchFriendships(userId);
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
+        if (globalCleanedUpRef.current) return;
+        const newDm = payload.new;
+        const currUserId = userRef.current?.id;
+        if (currUserId && (newDm.sender_id === currUserId || newDm.receiver_id === currUserId)) {
+          setDmMessages(prev => {
+            if (prev.some(d => d.id === newDm.id)) return prev;
+            return [...prev, newDm];
+          });
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
+        if (globalCleanedUpRef.current) return;
+        fetchAllProfiles();
+      })
+      .subscribe(async (status, err) => {
+        if (globalCleanedUpRef.current) return;
+        globalChanStatusRef.current = status;
+        console.log(`[REALTIME-GLOBAL] Status update: ${status}`, err || '');
+
+        if (status === 'SUBSCRIBED') {
+          console.log("[REALTIME-GLOBAL] Subscribed successfully. Fetching catch-up data...");
+          try {
+            const { data: dbRooms, error: roomsError } = await supabase
+              .from('rooms')
+              .select('*')
+              .order('created_at', { ascending: true });
+            
+            if (globalCleanedUpRef.current) return;
+            if (!roomsError && dbRooms) {
+              setRooms(dbRooms.map(normalizeRoom));
+            }
+
+            const userId = userRef.current?.id;
+            if (userId) {
+              await fetchFriendships(userId);
+              await fetchDirectMessages(userId);
+              await fetchAllProfiles();
+            }
+          } catch (catchUpErr) {
+            console.error("[REALTIME-GLOBAL] Catch-up fetch error:", catchUpErr);
+          }
+        }
+      });
+
+    globalChanRef.current = chan;
+  };
+
+  const subscribeRoomChan = (roomId) => {
+    if (!isSupabaseConfigured || !supabase || globalCleanedUpRef.current || !roomId) return;
+
+    if (roomSyncChanRef.current) {
+      try {
+        supabase.removeChannel(roomSyncChanRef.current);
+      } catch (e) {
+        console.warn("Error removing existing room channel:", e);
+      }
+      roomSyncChanRef.current = null;
+    }
+
+    const roomSyncChan = supabase.channel(`room-sync:${roomId}`);
+
+    const fetchInitialRoomData = async () => {
+      if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+
+      try {
+        const { data: dbChats } = await supabase
+          .from('messages')
+          .select('*')
+          .eq('room_id', roomId)
+          .order('created_at', { ascending: true })
+          .limit(50);
+        
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+
+        if (dbChats) {
+          setChatMessages(dbChats.map(c => ({
+            id: c.id,
+            sender: c.sender_name,
+            text: c.text,
+            timestamp: formatTimestamp(c.created_at)
+          })));
+        }
+
+        const { data: dbTasks } = await supabase
+          .from('tasks')
+          .select('*')
+          .eq('room_id', roomId)
+          .order('created_at', { ascending: true });
+        
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+
+        if (dbTasks) {
+          setTasks(dbTasks.map(t => ({
+            id: t.id,
+            text: t.text,
+            completed: t.completed,
+            user: t.user_name
+          })));
+        }
+
+        const { data: dbBoard } = await supabase
+          .from('whiteboards')
+          .select('data_url')
+          .eq('room_id', roomId)
+          .maybeSingle();
+
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+
+        if (dbBoard) {
+          setWhiteboardData(dbBoard.data_url || '');
+        } else {
+          await supabase.from('whiteboards').insert({
+            room_id: roomId,
+            data_url: ''
+          });
+          if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+          setWhiteboardData('');
+        }
+      } catch (err) {
+        console.error(`[REALTIME-ROOM:${roomId}] Initial load error:`, err);
+      }
+    };
+
+    fetchInitialRoomData();
+
+    roomSyncChan
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'messages', 
+        filter: `room_id=eq.${roomId}` 
+      }, (payload) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        const timestampVal = formatTimestamp(payload.new.created_at);
+        setChatMessages(prev => {
+          if (prev.some(m => m.id === payload.new.id)) return prev;
+
+          const matchIndex = prev.findIndex(m => 
+            String(m.id).startsWith('temp-msg-') && 
+            m.text === payload.new.text && 
+            m.sender === payload.new.sender_name
+          );
+
+          if (matchIndex !== -1) {
+            const next = [...prev];
+            next[matchIndex] = {
+              id: payload.new.id,
+              sender: payload.new.sender_name,
+              text: payload.new.text,
+              timestamp: timestampVal
+            };
+            return next;
+          }
+
+          return [...prev, {
+            id: payload.new.id,
+            sender: payload.new.sender_name,
+            text: payload.new.text,
+            timestamp: timestampVal
+          }];
+        });
+      })
+      .on('postgres_changes', { 
+        event: '*', 
+        schema: 'public', 
+        table: 'tasks', 
+        filter: `room_id=eq.${roomId}` 
+      }, (payload) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        if (payload.eventType === 'INSERT') {
+          setTasks(prev => {
+            if (prev.some(t => t.id === payload.new.id)) return prev;
+            
+            const matchIndex = prev.findIndex(t => 
+              String(t.id).startsWith('temp-t-') && 
+              t.text === payload.new.text && 
+              t.user === payload.new.user_name
+            );
+
+            if (matchIndex !== -1) {
+              const next = [...prev];
+              next[matchIndex] = {
+                id: payload.new.id,
+                text: payload.new.text,
+                completed: payload.new.completed,
+                user: payload.new.user_name
+              };
+              return next;
+            }
+
+            return [...prev, {
+              id: payload.new.id,
+              text: payload.new.text,
+              completed: payload.new.completed,
+              user: payload.new.user_name
+            }];
+          });
+        } else if (payload.eventType === 'UPDATE') {
+          setTasks(prev => prev.map(t => t.id === payload.new.id ? {
+            ...t,
+            completed: payload.new.completed
+          } : t));
+        } else if (payload.eventType === 'DELETE') {
+          setTasks(prev => prev.filter(t => t.id !== payload.old.id));
+        }
+      })
+      .on('postgres_changes', { 
+        event: 'UPDATE', 
+        schema: 'public', 
+        table: 'whiteboards', 
+        filter: `room_id=eq.${roomId}` 
+      }, (payload) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        setWhiteboardData(payload.new.data_url || '');
+      })
+      .on('presence', { event: 'sync' }, () => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        const state = roomSyncChan.presenceState();
+        const list = Object.values(state).flat().map(p => ({
+          name: p.username || 'Scholar',
+          status: p.status || 'Joined 🚪',
+          avatarColor: p.avatar_color || '#a855f7',
+          xp: p.xp || 0
+        }));
+        setParticipants(list);
+      })
+      .subscribe(async (status, err) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        roomSyncChanStatusRef.current = status;
+        console.log(`[REALTIME-ROOM:${roomId}] Status update: ${status}`, err || '');
+
+        if (status === 'SUBSCRIBED' && userRef.current) {
+          await roomSyncChan.track({
+            username: userRef.current.name,
+            status: 'Focusing ✍️',
+            avatar_color: userRef.current.avatarColor,
+            xp: statsRef.current.xp
+          });
+          
+          fetchInitialRoomData();
+        }
+      });
+
+    roomSyncChanRef.current = roomSyncChan;
+  };
+
   // --- SUPABASE PROD MODE ---
   const initSupabase = async () => {
     try {
@@ -323,135 +648,8 @@ export const RealtimeSyncProvider = ({ children }) => {
         setRooms(dbRooms.map(normalizeRoom));
       }
 
-      // 4. Subscribe to public rooms table updates
-      let roomsChan = null;
-      const subscribeRooms = () => {
-        if (globalCleanedUpRef.current) return;
-        if (roomsChan) {
-          try { supabase.removeChannel(roomsChan); } catch (e) {}
-        }
-
-        roomsChan = supabase
-          .channel('rooms-all-changes')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
-            if (globalCleanedUpRef.current) return;
-            if (payload.eventType === 'INSERT') {
-              setRooms(prev => {
-                const normalized = normalizeRoom(payload.new);
-                if (prev.some(r => r.id === normalized.id)) return prev;
-                return [...prev, normalized];
-              });
-            } else if (payload.eventType === 'UPDATE') {
-              setRooms(prev => prev.map(r => r.id === payload.new.id ? normalizeRoom(payload.new) : r));
-            } else if (payload.eventType === 'DELETE') {
-              setRooms(prev => prev.filter(r => r.id !== payload.old.id));
-            }
-          })
-          .subscribe((status, err) => {
-            if (globalCleanedUpRef.current) return;
-            if (err) console.error("rooms-all-changes subscription error:", err);
-            console.log("rooms-all-changes subscription status:", status);
-            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-              console.warn(`rooms-all-changes disconnected (${status}). Re-subscribing in 5s...`);
-              clearTimeout(globalTimeoutsRef.current.rooms);
-              globalTimeoutsRef.current.rooms = setTimeout(subscribeRooms, 5000);
-            }
-          });
-        globalChannelsRef.current.roomsChan = roomsChan;
-      };
-      subscribeRooms();
-
-      // 5. Subscribe to friends updates
-      let friendsChan = null;
-      const subscribeFriends = () => {
-        if (globalCleanedUpRef.current) return;
-        if (friendsChan) {
-          try { supabase.removeChannel(friendsChan); } catch (e) {}
-        }
-
-        friendsChan = supabase
-          .channel('friends-changes')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
-            if (globalCleanedUpRef.current) return;
-            const userId = userRef.current?.id;
-            if (userId) fetchFriendships(userId);
-          })
-          .subscribe((status, err) => {
-            if (globalCleanedUpRef.current) return;
-            if (err) console.error("friends-changes subscription error:", err);
-            console.log("friends-changes subscription status:", status);
-            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-              console.warn(`friends-changes disconnected (${status}). Re-subscribing in 5s...`);
-              clearTimeout(globalTimeoutsRef.current.friends);
-              globalTimeoutsRef.current.friends = setTimeout(subscribeFriends, 5000);
-            }
-          });
-        globalChannelsRef.current.friendsChan = friendsChan;
-      };
-      subscribeFriends();
-
-      // 6. Subscribe to DMs involving us
-      let dmChan = null;
-      const subscribeDMs = () => {
-        if (globalCleanedUpRef.current) return;
-        if (dmChan) {
-          try { supabase.removeChannel(dmChan); } catch (e) {}
-        }
-
-        dmChan = supabase
-          .channel('dm-changes')
-          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
-            if (globalCleanedUpRef.current) return;
-            const newDm = payload.new;
-            const currUserId = userRef.current?.id;
-            if (currUserId && (newDm.sender_id === currUserId || newDm.receiver_id === currUserId)) {
-              setDmMessages(prev => {
-                if (prev.some(d => d.id === newDm.id)) return prev;
-                return [...prev, newDm];
-              });
-            }
-          })
-          .subscribe((status, err) => {
-            if (globalCleanedUpRef.current) return;
-            if (err) console.error("dm-changes subscription error:", err);
-            console.log("dm-changes subscription status:", status);
-            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-              console.warn(`dm-changes disconnected (${status}). Re-subscribing in 5s...`);
-              clearTimeout(globalTimeoutsRef.current.dm);
-              globalTimeoutsRef.current.dm = setTimeout(subscribeDMs, 5000);
-            }
-          });
-        globalChannelsRef.current.dmChan = dmChan;
-      };
-      subscribeDMs();
-
-      // 7. Subscribe to profiles updates
-      let profilesChan = null;
-      const subscribeProfiles = () => {
-        if (globalCleanedUpRef.current) return;
-        if (profilesChan) {
-          try { supabase.removeChannel(profilesChan); } catch (e) {}
-        }
-
-        profilesChan = supabase
-          .channel('profiles-changes')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
-            if (globalCleanedUpRef.current) return;
-            fetchAllProfiles();
-          })
-          .subscribe((status, err) => {
-            if (globalCleanedUpRef.current) return;
-            if (err) console.error("profiles-changes subscription error:", err);
-            console.log("profiles-changes subscription status:", status);
-            if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-              console.warn(`profiles-changes disconnected (${status}). Re-subscribing in 5s...`);
-              clearTimeout(globalTimeoutsRef.current.profiles);
-              globalTimeoutsRef.current.profiles = setTimeout(subscribeProfiles, 5000);
-            }
-          });
-        globalChannelsRef.current.profilesChan = profilesChan;
-      };
-      subscribeProfiles();
+      // 4. Subscribe to global changes
+      subscribeGlobalChan();
 
       if (globalCleanedUpRef.current) return;
       setLoading(false);
@@ -768,193 +966,32 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     // --- PROD SUPABASE SYNC LOGIC ---
-    let isCurrentSubscription = true;
-    let roomSyncChan = null;
-    let reconnectTimeout = null;
-
-    // 1. Fetch Room State (Chats, Tasks, Whiteboard)
-    const fetchInitialRoomData = async () => {
-      // Chats
-      const { data: dbChats } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('room_id', activeRoomId)
-        .order('created_at', { ascending: true })
-        .limit(50);
-      
-      if (!isCurrentSubscription) return;
-
-      if (dbChats) {
-        setChatMessages(dbChats.map(c => ({
-          id: c.id,
-          sender: c.sender_name,
-          text: c.text,
-          timestamp: formatTimestamp(c.created_at)
-        })));
+    if (activeRoomId) {
+      subscribeRoomChan(activeRoomId);
+    } else {
+      if (roomSyncChanRef.current) {
+        try {
+          supabase.removeChannel(roomSyncChanRef.current);
+        } catch (e) {}
+        roomSyncChanRef.current = null;
       }
-
-      // Tasks
-      const { data: dbTasks } = await supabase
-        .from('tasks')
-        .select('*')
-        .eq('room_id', activeRoomId)
-        .order('created_at', { ascending: true });
-      
-      if (!isCurrentSubscription) return;
-
-      if (dbTasks) {
-        setTasks(dbTasks.map(t => ({
-          id: t.id,
-          text: t.text,
-          completed: t.completed,
-          user: t.user_name
-        })));
-      }
-
-      // Whiteboard
-      const { data: dbBoard } = await supabase
-        .from('whiteboards')
-        .select('data_url')
-        .eq('room_id', activeRoomId)
-        .maybeSingle();
-
-      if (!isCurrentSubscription) return;
-
-      if (dbBoard) {
-        setWhiteboardData(dbBoard.data_url || '');
-      } else {
-        // Create a whiteboard record if missing (e.g. for seed rooms)
-        await supabase.from('whiteboards').insert({
-          room_id: activeRoomId,
-          data_url: ''
-        });
-        if (!isCurrentSubscription) return;
-        setWhiteboardData('');
-      }
-    };
-
-    fetchInitialRoomData();
-
-    // 2. Subscribe to all room-specific updates in a single multiplexed channel
-    const subscribeRoom = () => {
-      if (!isCurrentSubscription) return;
-      if (roomSyncChan) {
-        try { supabase.removeChannel(roomSyncChan); } catch (e) {}
-      }
-
-      roomSyncChan = supabase.channel(`room-sync:${activeRoomId}`);
-
-      roomSyncChan
-        .on('postgres_changes', { 
-          event: 'INSERT', 
-          schema: 'public', 
-          table: 'messages', 
-          filter: `room_id=eq.${activeRoomId}` 
-        }, (payload) => {
-          if (!isCurrentSubscription) return;
-          const timestampVal = formatTimestamp(payload.new.created_at);
-          setChatMessages(prev => {
-            const hasOptimistic = prev.some(m => m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-'));
-            if (hasOptimistic) {
-              return prev.map(m => (m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-')) ? {
-                id: payload.new.id,
-                sender: payload.new.sender_name,
-                text: payload.new.text,
-                timestamp: timestampVal
-              } : m);
-            }
-            return [...prev, {
-              id: payload.new.id,
-              sender: payload.new.sender_name,
-              text: payload.new.text,
-              timestamp: timestampVal
-            }];
-          });
-        })
-        .on('postgres_changes', { 
-          event: '*', 
-          schema: 'public', 
-          table: 'tasks', 
-          filter: `room_id=eq.${activeRoomId}` 
-        }, (payload) => {
-          if (!isCurrentSubscription) return;
-          if (payload.eventType === 'INSERT') {
-            setTasks(prev => {
-              if (prev.some(t => t.id === payload.new.id)) return prev;
-              const listWithoutTemp = prev.filter(t => t.text !== payload.new.text || !String(t.id).startsWith('temp-'));
-              return [...listWithoutTemp, {
-                id: payload.new.id,
-                text: payload.new.text,
-                completed: payload.new.completed,
-                user: payload.new.user_name
-              }];
-            });
-          } else if (payload.eventType === 'UPDATE') {
-            setTasks(prev => prev.map(t => t.id === payload.new.id ? {
-              ...t,
-              completed: payload.new.completed
-            } : t));
-          } else if (payload.eventType === 'DELETE') {
-            setTasks(prev => prev.filter(t => t.id !== payload.old.id));
-          }
-        })
-        .on('postgres_changes', { 
-          event: 'UPDATE', 
-          schema: 'public', 
-          table: 'whiteboards', 
-          filter: `room_id=eq.${activeRoomId}` 
-        }, (payload) => {
-          if (!isCurrentSubscription) return;
-          setWhiteboardData(payload.new.data_url || '');
-        })
-        .on('presence', { event: 'sync' }, () => {
-          if (!isCurrentSubscription) return;
-          const state = roomSyncChan.presenceState();
-          const list = Object.values(state).flat().map(p => ({
-            name: p.username || 'Scholar',
-            status: p.status || 'Joined 🚪',
-            avatarColor: p.avatar_color || '#a855f7',
-            xp: p.xp || 0
-          }));
-          setParticipants(list);
-        })
-        .subscribe(async (status, err) => {
-          if (!isCurrentSubscription) return;
-          if (err) console.error("roomSyncChan subscription error:", err);
-          console.log("roomSyncChan subscription status:", status);
-          if (status === 'SUBSCRIBED' && userRef.current) {
-            await roomSyncChan.track({
-              username: userRef.current.name,
-              status: 'Focusing ✍️',
-              avatar_color: userRef.current.avatarColor,
-              xp: statsRef.current.xp
-            });
-          }
-          if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-            if (isCurrentSubscription) {
-              console.warn(`Room subscription disconnected (${status}). Re-subscribing in 3s...`);
-              clearTimeout(reconnectTimeout);
-              reconnectTimeout = setTimeout(subscribeRoom, 3000);
-            }
-          }
-        });
-
-      channelRef.current = {
-        roomSyncChan
-      };
-    };
-
-    subscribeRoom();
+      roomSyncChanStatusRef.current = 'none';
+      setParticipants([]);
+      setChatMessages([]);
+      setTasks([]);
+      setWhiteboardData('');
+    }
 
     return () => {
-      isCurrentSubscription = false;
-      clearTimeout(reconnectTimeout);
-      if (supabase && roomSyncChan) {
-        try { supabase.removeChannel(roomSyncChan); } catch (e) {}
+      if (isSupabaseConfigured && roomSyncChanRef.current) {
+        try {
+          supabase.removeChannel(roomSyncChanRef.current);
+        } catch (e) {}
+        roomSyncChanRef.current = null;
       }
+      roomSyncChanStatusRef.current = 'none';
     };
-
-  }, [activeRoomId, user?.id]);
+  }, [activeRoomId]);
 
   // =================================================================
   // TIMER TICKING LOOP (SERVERTIME COMPARATIVE SYNC)
