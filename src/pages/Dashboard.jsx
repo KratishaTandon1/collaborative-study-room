@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useRealtimeSync } from '../context/RealtimeSyncContext';
 import { 
   Search, Plus, Users, Clock, Hash, Trophy, Calendar, 
-  Sparkles, Award, ArrowRight, BookOpen, Music, CheckCircle2, UserPlus, MessageSquare, Send
+  Sparkles, Award, ArrowRight, BookOpen, Music, CheckCircle2, UserPlus, MessageSquare, Send, Trash
 } from 'lucide-react';
 
 export default function Dashboard() {
