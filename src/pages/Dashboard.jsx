@@ -13,10 +13,6 @@ export default function Dashboard() {
 
   const dmEndRef = useRef(null);
 
-  useEffect(() => {
-    dmEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [dmMessages, activeDmFriend]);
-
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -46,6 +42,10 @@ export default function Dashboard() {
   const [socialSuccess, setSocialSuccess] = useState('');
   const [activeDmFriend, setActiveDmFriend] = useState(null);
   const [dmTextInput, setDmTextInput] = useState('');
+
+  useEffect(() => {
+    dmEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [dmMessages, activeDmFriend]);
 
   // Extract categories
   const categories = ['All', ...new Set(rooms.map(r => r.category))];
