@@ -901,12 +901,24 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     setTimeout(() => {
-      sendSystemAlert(roomId, `${user?.name || 'Someone'} joined the study room.`);
+      const roomExists = rooms.some(r => r.id === roomId);
+      if (roomExists) {
+        sendSystemAlert(roomId, `${user?.name || 'Someone'} joined the study room.`).catch(err => {
+          console.warn("Failed to send join system alert:", err);
+        });
+      }
     }, 400);
   };
 
   const leaveRoom = async (roomId) => {
-    await sendSystemAlert(roomId, `${user?.name || 'Someone'} left the study room.`);
+    const roomExists = rooms.some(r => r.id === roomId);
+    if (roomExists) {
+      try {
+        await sendSystemAlert(roomId, `${user?.name || 'Someone'} left the study room.`);
+      } catch (err) {
+        console.warn("Failed to send leave system alert:", err);
+      }
+    }
     
     if (!isSupabaseConfigured && user) {
       localBroadcastChannelRef.current?.postMessage({
@@ -917,7 +929,11 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     if (isSupabaseConfigured && channelRef.current?.presenceChan) {
-      await channelRef.current.presenceChan.untrack();
+      try {
+        await channelRef.current.presenceChan.untrack();
+      } catch (err) {
+        console.warn("Failed presence untrack:", err);
+      }
     }
     setActiveRoomId(null);
   };
