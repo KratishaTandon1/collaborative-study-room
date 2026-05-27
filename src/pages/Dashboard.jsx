@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRealtimeSync } from '../context/RealtimeSyncContext';
 import { 
   Search, Plus, Users, Clock, Hash, Trophy, Calendar, 
@@ -10,6 +10,12 @@ export default function Dashboard() {
     user, rooms, createRoom, deleteRoom, joinRoom, stats, addManualSession, allParticipants, supabase,
     friendsList, dmMessages, allProfiles, sendFriendRequest, acceptFriendRequest, cancelOrRemoveFriend, sendDirectMessage, activeRoomId
   } = useRealtimeSync();
+
+  const dmEndRef = useRef(null);
+
+  useEffect(() => {
+    dmEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [dmMessages, activeDmFriend]);
 
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
@@ -835,6 +841,7 @@ export default function Dashboard() {
                   );
                 });
               })()}
+              <div ref={dmEndRef} />
             </div>
 
             {/* Form actions */}

@@ -108,6 +108,7 @@ export default function StudyRoom() {
   const [lineWidth, setLineWidth] = useState(4);
 
   const chatEndRef = useRef(null);
+  const lastSavedBoardRef = useRef('');
 
   const ambienceTracks = {
     lofi: 'https://coderadio-admin-v2.freecodecamp.org/listen/coderadio/radio.mp3', // Code Radio stream
@@ -168,6 +169,9 @@ export default function StudyRoom() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    if (whiteboardData === lastSavedBoardRef.current) return;
+    if (isDrawing) return;
+
     const ctx = canvas.getContext('2d');
     if (!whiteboardData) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -224,6 +228,7 @@ export default function StudyRoom() {
     
     const canvas = canvasRef.current;
     const dataURL = canvas.toDataURL();
+    lastSavedBoardRef.current = dataURL;
     saveWhiteboard(activeRoomId, dataURL);
   };
 
@@ -231,6 +236,7 @@ export default function StudyRoom() {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    lastSavedBoardRef.current = '';
     saveWhiteboard(activeRoomId, '');
   };
 
