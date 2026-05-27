@@ -261,7 +261,10 @@ export const RealtimeSyncProvider = ({ children }) => {
             setRooms(prev => prev.filter(r => r.id !== payload.old.id));
           }
         })
-        .subscribe();
+        .subscribe((status, err) => {
+          if (err) console.error("rooms-all-changes subscription error:", err);
+          console.log("rooms-all-changes subscription status:", status);
+        });
 
       // 5. Subscribe to friends updates
       supabase
@@ -272,7 +275,10 @@ export const RealtimeSyncProvider = ({ children }) => {
             if (userId) fetchFriendships(userId);
           });
         })
-        .subscribe();
+        .subscribe((status, err) => {
+          if (err) console.error("friends-changes subscription error:", err);
+          console.log("friends-changes subscription status:", status);
+        });
 
       // 6. Subscribe to DMs involving us
       supabase
@@ -289,7 +295,10 @@ export const RealtimeSyncProvider = ({ children }) => {
             }
           });
         })
-        .subscribe();
+        .subscribe((status, err) => {
+          if (err) console.error("dm-changes subscription error:", err);
+          console.log("dm-changes subscription status:", status);
+        });
 
       // 7. Subscribe to profiles updates
       supabase
@@ -297,7 +306,10 @@ export const RealtimeSyncProvider = ({ children }) => {
         .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
           fetchAllProfiles();
         })
-        .subscribe();
+        .subscribe((status, err) => {
+          if (err) console.error("profiles-changes subscription error:", err);
+          console.log("profiles-changes subscription status:", status);
+        });
 
       setLoading(false);
     } catch (e) {
@@ -666,7 +678,10 @@ export const RealtimeSyncProvider = ({ children }) => {
           timestamp: new Date(payload.new.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }]);
       })
-      .subscribe();
+      .subscribe((status, err) => {
+        if (err) console.error("chatChan subscription error:", err);
+        console.log("chatChan subscription status:", status);
+      });
 
     const taskChan = supabase
       .channel(`room-tasks:${activeRoomId}`)
@@ -692,7 +707,10 @@ export const RealtimeSyncProvider = ({ children }) => {
           setTasks(prev => prev.filter(t => t.id !== payload.old.id));
         }
       })
-      .subscribe();
+      .subscribe((status, err) => {
+        if (err) console.error("taskChan subscription error:", err);
+        console.log("taskChan subscription status:", status);
+      });
 
     // 3. Whiteboard Sync postgres update channel
     const boardChan = supabase
@@ -705,7 +723,10 @@ export const RealtimeSyncProvider = ({ children }) => {
       }, (payload) => {
         setWhiteboardData(payload.new.data_url || '');
       })
-      .subscribe();
+      .subscribe((status, err) => {
+        if (err) console.error("boardChan subscription error:", err);
+        console.log("boardChan subscription status:", status);
+      });
 
     // 4. Sync participants online list using Supabase Presence WebSockets!
     const presenceChan = supabase.channel(`presence:${activeRoomId}`);
@@ -720,7 +741,9 @@ export const RealtimeSyncProvider = ({ children }) => {
         }));
         setParticipants(list);
       })
-      .subscribe(async (status) => {
+      .subscribe(async (status, err) => {
+        if (err) console.error("presenceChan subscription error:", err);
+        console.log("presenceChan subscription status:", status);
         if (status === 'SUBSCRIBED' && user) {
           await presenceChan.track({
             username: user.name,
