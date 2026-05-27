@@ -109,6 +109,15 @@ const normalizeRoom = (room) => {
   };
 };
 
+const formatTimestamp = (dateStr) => {
+  if (!dateStr) return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) {
+    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
 export const RealtimeSyncProvider = ({ children }) => {
   // Common states
   const [user, setUser] = useState(null);
@@ -140,6 +149,13 @@ export const RealtimeSyncProvider = ({ children }) => {
   const channelRef = useRef(null);
   const localBroadcastChannelRef = useRef(null);
   const timerIntervalRef = useRef(null);
+  const globalChannelsRef = useRef({
+    roomsChan: null,
+    friendsChan: null,
+    dmChan: null,
+    profilesChan: null
+  });
+  const authSubscriptionRef = useRef(null);
 
   // =================================================================
   // HYBRID INIT & STATE ROUTING
@@ -151,6 +167,17 @@ export const RealtimeSyncProvider = ({ children }) => {
     } else {
       initLocalFallback();
     }
+
+    return () => {
+      if (isSupabaseConfigured && supabase) {
+        const { roomsChan, friendsChan, dmChan, profilesChan } = globalChannelsRef.current;
+        if (roomsChan) supabase.removeChannel(roomsChan);
+        if (friendsChan) supabase.removeChannel(friendsChan);
+        if (dmChan) supabase.removeChannel(dmChan);
+        if (profilesChan) supabase.removeChannel(profilesChan);
+        if (authSubscriptionRef.current) authSubscriptionRef.current.unsubscribe();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -226,7 +253,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       }
 
       // 2. Auth state change listener
-      supabase.auth.onAuthStateChange(async (event, session) => {
+      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session) {
           await handleSupabaseUserSignIn(session.user);
         } else {
@@ -234,6 +261,7 @@ export const RealtimeSyncProvider = ({ children }) => {
           setStats({ xp: 0, totalMinutes: 0, completedSessions: 0, streakDays: 0, badges: ALL_BADGES, sessionHistory: [] });
         }
       });
+      authSubscriptionRef.current = subscription;
 
       // 3. Fetch rooms
       const { data: dbRooms, error: roomsError } = await supabase
@@ -246,7 +274,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       }
 
       // 4. Subscribe to public rooms table updates
-      supabase
+      const roomsChan = supabase
         .channel('rooms-all-changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
           if (payload.eventType === 'INSERT') {
@@ -265,9 +293,10 @@ export const RealtimeSyncProvider = ({ children }) => {
           if (err) console.error("rooms-all-changes subscription error:", err);
           console.log("rooms-all-changes subscription status:", status);
         });
+      globalChannelsRef.current.roomsChan = roomsChan;
 
       // 5. Subscribe to friends updates
-      supabase
+      const friendsChan = supabase
         .channel('friends-changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
           supabase.auth.getSession().then(({ data }) => {
@@ -279,9 +308,10 @@ export const RealtimeSyncProvider = ({ children }) => {
           if (err) console.error("friends-changes subscription error:", err);
           console.log("friends-changes subscription status:", status);
         });
+      globalChannelsRef.current.friendsChan = friendsChan;
 
       // 6. Subscribe to DMs involving us
-      supabase
+      const dmChan = supabase
         .channel('dm-changes')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
           const newDm = payload.new;
@@ -299,9 +329,10 @@ export const RealtimeSyncProvider = ({ children }) => {
           if (err) console.error("dm-changes subscription error:", err);
           console.log("dm-changes subscription status:", status);
         });
+      globalChannelsRef.current.dmChan = dmChan;
 
       // 7. Subscribe to profiles updates
-      supabase
+      const profilesChan = supabase
         .channel('profiles-changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
           fetchAllProfiles();
@@ -310,6 +341,7 @@ export const RealtimeSyncProvider = ({ children }) => {
           if (err) console.error("profiles-changes subscription error:", err);
           console.log("profiles-changes subscription status:", status);
         });
+      globalChannelsRef.current.profilesChan = profilesChan;
 
       setLoading(false);
     } catch (e) {
@@ -623,7 +655,7 @@ export const RealtimeSyncProvider = ({ children }) => {
         setChatMessages(dbChats.map(c => ({
           sender: c.sender_name,
           text: c.text,
-          timestamp: new Date(c.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          timestamp: formatTimestamp(c.created_at)
         })));
       }
 
@@ -663,28 +695,23 @@ export const RealtimeSyncProvider = ({ children }) => {
 
     fetchInitialRoomData();
 
-    // 2. Subscribe to realtime room events (Chat messages & tasks tables)
-    const chatChan = supabase
-      .channel(`room-chats:${activeRoomId}`)
+    // 2. Subscribe to all room-specific updates in a single multiplexed channel
+    const roomSyncChan = supabase.channel(`room-sync:${activeRoomId}`);
+
+    roomSyncChan
       .on('postgres_changes', { 
         event: 'INSERT', 
         schema: 'public', 
         table: 'messages', 
         filter: `room_id=eq.${activeRoomId}` 
       }, (payload) => {
+        const timestampVal = formatTimestamp(payload.new.created_at);
         setChatMessages(prev => [...prev, {
           sender: payload.new.sender_name,
           text: payload.new.text,
-          timestamp: new Date(payload.new.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          timestamp: timestampVal
         }]);
       })
-      .subscribe((status, err) => {
-        if (err) console.error("chatChan subscription error:", err);
-        console.log("chatChan subscription status:", status);
-      });
-
-    const taskChan = supabase
-      .channel(`room-tasks:${activeRoomId}`)
       .on('postgres_changes', { 
         event: '*', 
         schema: 'public', 
@@ -707,14 +734,6 @@ export const RealtimeSyncProvider = ({ children }) => {
           setTasks(prev => prev.filter(t => t.id !== payload.old.id));
         }
       })
-      .subscribe((status, err) => {
-        if (err) console.error("taskChan subscription error:", err);
-        console.log("taskChan subscription status:", status);
-      });
-
-    // 3. Whiteboard Sync postgres update channel
-    const boardChan = supabase
-      .channel(`room-whiteboard:${activeRoomId}`)
       .on('postgres_changes', { 
         event: 'UPDATE', 
         schema: 'public', 
@@ -723,16 +742,8 @@ export const RealtimeSyncProvider = ({ children }) => {
       }, (payload) => {
         setWhiteboardData(payload.new.data_url || '');
       })
-      .subscribe((status, err) => {
-        if (err) console.error("boardChan subscription error:", err);
-        console.log("boardChan subscription status:", status);
-      });
-
-    // 4. Sync participants online list using Supabase Presence WebSockets!
-    const presenceChan = supabase.channel(`presence:${activeRoomId}`);
-    presenceChan
       .on('presence', { event: 'sync' }, () => {
-        const state = presenceChan.presenceState();
+        const state = roomSyncChan.presenceState();
         const list = Object.values(state).flat().map(p => ({
           name: p.username || 'Scholar',
           status: p.status || 'Joined 🚪',
@@ -742,10 +753,10 @@ export const RealtimeSyncProvider = ({ children }) => {
         setParticipants(list);
       })
       .subscribe(async (status, err) => {
-        if (err) console.error("presenceChan subscription error:", err);
-        console.log("presenceChan subscription status:", status);
+        if (err) console.error("roomSyncChan subscription error:", err);
+        console.log("roomSyncChan subscription status:", status);
         if (status === 'SUBSCRIBED' && user) {
-          await presenceChan.track({
+          await roomSyncChan.track({
             username: user.name,
             status: 'Focusing ✍️',
             avatar_color: user.avatarColor,
@@ -755,20 +766,16 @@ export const RealtimeSyncProvider = ({ children }) => {
       });
 
     channelRef.current = {
-      chatChan,
-      taskChan,
-      presenceChan,
-      boardChan
+      roomSyncChan
     };
 
     return () => {
-      chatChan.unsubscribe();
-      taskChan.unsubscribe();
-      presenceChan.unsubscribe();
-      boardChan.unsubscribe();
+      if (supabase) {
+        supabase.removeChannel(roomSyncChan);
+      }
     };
 
-  }, [activeRoomId, user]);
+  }, [activeRoomId, user?.id]);
 
   // =================================================================
   // TIMER TICKING LOOP (SERVERTIME COMPARATIVE SYNC)
@@ -964,9 +971,9 @@ export const RealtimeSyncProvider = ({ children }) => {
       setParticipants([]);
     }
 
-    if (isSupabaseConfigured && channelRef.current?.presenceChan) {
+    if (isSupabaseConfigured && channelRef.current?.roomSyncChan) {
       try {
-        await channelRef.current.presenceChan.untrack();
+        await channelRef.current.roomSyncChan.untrack();
       } catch (err) {
         console.warn("Failed presence untrack:", err);
       }
@@ -984,8 +991,8 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    if (isSupabaseConfigured && channelRef.current?.presenceChan && user) {
-      await channelRef.current.presenceChan.track({
+    if (isSupabaseConfigured && channelRef.current?.roomSyncChan && user) {
+      await channelRef.current.roomSyncChan.track({
         username: user.name,
         status: newStatus,
         avatar_color: user.avatarColor,
