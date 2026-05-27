@@ -717,11 +717,23 @@ export const RealtimeSyncProvider = ({ children }) => {
         filter: `room_id=eq.${activeRoomId}` 
       }, (payload) => {
         const timestampVal = formatTimestamp(payload.new.created_at);
-        setChatMessages(prev => [...prev, {
-          sender: payload.new.sender_name,
-          text: payload.new.text,
-          timestamp: timestampVal
-        }]);
+        setChatMessages(prev => {
+          const hasOptimistic = prev.some(m => m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-'));
+          if (hasOptimistic) {
+            return prev.map(m => (m.text === payload.new.text && m.sender === payload.new.sender_name && String(m.id).startsWith('temp-msg-')) ? {
+              id: payload.new.id,
+              sender: payload.new.sender_name,
+              text: payload.new.text,
+              timestamp: timestampVal
+            } : m);
+          }
+          return [...prev, {
+            id: payload.new.id,
+            sender: payload.new.sender_name,
+            text: payload.new.text,
+            timestamp: timestampVal
+          }];
+        });
       })
       .on('postgres_changes', { 
         event: '*', 
@@ -730,12 +742,16 @@ export const RealtimeSyncProvider = ({ children }) => {
         filter: `room_id=eq.${activeRoomId}` 
       }, (payload) => {
         if (payload.eventType === 'INSERT') {
-          setTasks(prev => [...prev, {
-            id: payload.new.id,
-            text: payload.new.text,
-            completed: payload.new.completed,
-            user: payload.new.user_name
-          }]);
+          setTasks(prev => {
+            if (prev.some(t => t.id === payload.new.id)) return prev;
+            const listWithoutTemp = prev.filter(t => t.text !== payload.new.text || !String(t.id).startsWith('temp-'));
+            return [...listWithoutTemp, {
+              id: payload.new.id,
+              text: payload.new.text,
+              completed: payload.new.completed,
+              user: payload.new.user_name
+            }];
+          });
         } else if (payload.eventType === 'UPDATE') {
           setTasks(prev => prev.map(t => t.id === payload.new.id ? {
             ...t,
@@ -1157,18 +1173,20 @@ export const RealtimeSyncProvider = ({ children }) => {
   const sendChatMessage = async (roomId, text) => {
     if (!userRef.current) return;
 
+    const tempId = 'temp-msg-' + Date.now();
+    const timestampVal = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const tempMsg = {
+      id: tempId,
+      sender: userRef.current.name,
+      text,
+      timestamp: timestampVal
+    };
+    setChatMessages(prev => [...prev, tempMsg]);
+
     if (!isSupabaseConfigured) {
-      // Local Fallback
-      const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const message = {
-        sender: userRef.current.name,
-        text,
-        timestamp
-      };
-      setChatMessages(prev => [...prev, message]);
       localBroadcastChannelRef.current?.postMessage({
         type: 'CHAT_MSG',
-        payload: { roomId, message }
+        payload: { roomId, message: tempMsg }
       });
       return;
     }
@@ -1182,6 +1200,8 @@ export const RealtimeSyncProvider = ({ children }) => {
       });
       if (error) throw error;
     } catch (err) {
+      // Revert optimistic message
+      setChatMessages(prev => prev.filter(m => m.id !== tempId));
       console.error("Error sending chat message:", err);
       alert("Failed to send message: " + (err.message || err));
     }
@@ -1191,20 +1211,19 @@ export const RealtimeSyncProvider = ({ children }) => {
   const addTask = async (roomId, text) => {
     if (!userRef.current) return;
 
+    const tempId = 'temp-t-' + Date.now();
+    const tempTask = {
+      id: tempId,
+      text,
+      completed: false,
+      user: userRef.current.name
+    };
+    setTasks(prev => [...prev, tempTask]);
+
     if (!isSupabaseConfigured) {
-      const newTask = {
-        id: 't-' + Date.now(),
-        text,
-        completed: false,
-        user: userRef.current.name
-      };
-      setTasks(prev => {
-        const next = [...prev, newTask];
-        localBroadcastChannelRef.current?.postMessage({
-          type: 'TASK_UPDATE',
-          payload: { roomId, tasks: next }
-        });
-        return next;
+      localBroadcastChannelRef.current?.postMessage({
+        type: 'TASK_UPDATE',
+        payload: { roomId, tasks: [...tasks, tempTask] }
       });
       return;
     }
@@ -1218,6 +1237,8 @@ export const RealtimeSyncProvider = ({ children }) => {
       });
       if (error) throw error;
     } catch (err) {
+      // Revert optimistic task
+      setTasks(prev => prev.filter(t => t.id !== tempId));
       console.error("Error adding task:", err);
       alert("Failed to add task: " + (err.message || err));
     }
@@ -1227,14 +1248,13 @@ export const RealtimeSyncProvider = ({ children }) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
+    // Optimistic toggle
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t));
+
     if (!isSupabaseConfigured) {
-      setTasks(prev => {
-        const next = prev.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t);
-        localBroadcastChannelRef.current?.postMessage({
-          type: 'TASK_UPDATE',
-          payload: { roomId, tasks: next }
-        });
-        return next;
+      localBroadcastChannelRef.current?.postMessage({
+        type: 'TASK_UPDATE',
+        payload: { roomId, tasks: tasks.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t) }
       });
       return;
     }
@@ -1246,20 +1266,23 @@ export const RealtimeSyncProvider = ({ children }) => {
         .eq('id', taskId);
       if (error) throw error;
     } catch (err) {
+      // Revert optimistic toggle
+      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, completed: task.completed } : t));
       console.error("Error toggling task:", err);
       alert("Failed to update task: " + (err.message || err));
     }
   };
 
   const deleteTask = async (roomId, taskId) => {
+    const task = tasks.find(t => t.id === taskId);
+
+    // Optimistic delete
+    setTasks(prev => prev.filter(t => t.id !== taskId));
+
     if (!isSupabaseConfigured) {
-      setTasks(prev => {
-        const next = prev.filter(t => t.id !== taskId);
-        localBroadcastChannelRef.current?.postMessage({
-          type: 'TASK_UPDATE',
-          payload: { roomId, tasks: next }
-        });
-        return next;
+      localBroadcastChannelRef.current?.postMessage({
+        type: 'TASK_UPDATE',
+        payload: { roomId, tasks: tasks.filter(t => t.id !== taskId) }
       });
       return;
     }
@@ -1271,6 +1294,8 @@ export const RealtimeSyncProvider = ({ children }) => {
         .eq('id', taskId);
       if (error) throw error;
     } catch (err) {
+      // Revert optimistic delete
+      if (task) setTasks(prev => [...prev, task]);
       console.error("Error deleting task:", err);
       alert("Failed to delete task: " + (err.message || err));
     }
