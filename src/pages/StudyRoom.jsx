@@ -110,7 +110,7 @@ export default function StudyRoom() {
   const chatEndRef = useRef(null);
 
   const ambienceTracks = {
-    lofi: 'https://coderadio-admin.freecodecamp.org/radio/8010/radio.mp3', // Code Radio stream
+    lofi: 'https://coderadio-admin-v2.freecodecamp.org/listen/coderadio/radio.mp3', // Code Radio stream
     rain: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3', // Backup music track or sound
     cafe: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3'
   };

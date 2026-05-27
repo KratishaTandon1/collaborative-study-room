@@ -80,6 +80,29 @@ const ALL_BADGES = [
   { id: 'b6', name: 'Lofi Addict', description: 'Complete a Pomodoro with Lofi music on', icon: '🎧', unlocked: true }
 ];
 
+const normalizeRoom = (room) => {
+  if (!room) return room;
+  const isPrivateVal = room.is_private !== undefined ? room.is_private : room.isPrivate;
+  const bgImageVal = room.bg_image || room.bgImage;
+  const timerModeVal = room.timer_mode || room.timerMode;
+  const timerDurationVal = room.timer_duration || room.timerDuration;
+  const creatorIdVal = room.creator_id || room.creatorId;
+
+  return {
+    ...room,
+    bgImage: bgImageVal,
+    bg_image: bgImageVal,
+    timerMode: timerModeVal,
+    timer_mode: timerModeVal,
+    timerDuration: timerDurationVal,
+    timer_duration: timerDurationVal,
+    isPrivate: isPrivateVal,
+    is_private: isPrivateVal,
+    creatorId: creatorIdVal,
+    creator_id: creatorIdVal,
+  };
+};
+
 export const RealtimeSyncProvider = ({ children }) => {
   // Common states
   const [user, setUser] = useState(null);
@@ -193,7 +216,7 @@ export const RealtimeSyncProvider = ({ children }) => {
         .order('created_at', { ascending: true });
 
       if (!roomsError && dbRooms) {
-        setRooms(dbRooms);
+        setRooms(dbRooms.map(normalizeRoom));
       }
 
       // 4. Subscribe to public rooms table updates
@@ -201,9 +224,13 @@ export const RealtimeSyncProvider = ({ children }) => {
         .channel('rooms-all-changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
           if (payload.eventType === 'INSERT') {
-            setRooms(prev => [...prev, payload.new]);
+            setRooms(prev => {
+              const normalized = normalizeRoom(payload.new);
+              if (prev.some(r => r.id === normalized.id)) return prev;
+              return [...prev, normalized];
+            });
           } else if (payload.eventType === 'UPDATE') {
-            setRooms(prev => prev.map(r => r.id === payload.new.id ? payload.new : r));
+            setRooms(prev => prev.map(r => r.id === payload.new.id ? normalizeRoom(payload.new) : r));
           } else if (payload.eventType === 'DELETE') {
             setRooms(prev => prev.filter(r => r.id !== payload.old.id));
           }
@@ -246,12 +273,48 @@ export const RealtimeSyncProvider = ({ children }) => {
   };
 
   const handleSupabaseUserSignIn = async (supabaseUser) => {
-    // Fetch profile
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', supabaseUser.id)
-      .single();
+    let profile = null;
+    let retries = 5;
+    
+    while (retries > 0 && !profile) {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', supabaseUser.id)
+        .maybeSingle();
+      
+      if (data) {
+        profile = data;
+      } else {
+        retries--;
+        if (retries > 0) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+    }
+
+    if (!profile) {
+      console.warn("Profile trigger pending. Attempting backup frontend insert...");
+      const fallbackUsername = supabaseUser.user_metadata?.username || 
+                               (supabaseUser.email ? supabaseUser.email.split('@')[0] : 'Guest Scholar');
+      const fallbackAvatarColor = supabaseUser.user_metadata?.avatar_color || '#a855f7';
+      
+      const { data: insertedProfile, error: insertError } = await supabase
+        .from('profiles')
+        .insert({
+          id: supabaseUser.id,
+          username: fallbackUsername,
+          avatar_color: fallbackAvatarColor
+        })
+        .select()
+        .maybeSingle();
+
+      if (!insertError && insertedProfile) {
+        profile = insertedProfile;
+      } else {
+        console.error("Failed to insert fallback profile:", insertError);
+      }
+    }
 
     if (profile) {
       const activeUser = {
@@ -911,6 +974,12 @@ export const RealtimeSyncProvider = ({ children }) => {
       console.error(error);
       throw error;
     }
+
+    const normalizedNewRoom = normalizeRoom(data);
+    setRooms(prev => {
+      if (prev.some(r => r.id === normalizedNewRoom.id)) return prev;
+      return [...prev, normalizedNewRoom];
+    });
 
     // Create a whiteboard record
     await supabase.from('whiteboards').insert({
