@@ -15,9 +15,15 @@ const hasValidKeys = supabaseUrl &&
 
 export const isSupabaseConfigured = !!hasValidKeys;
 
-// Initialize Supabase Client
+// Initialize Supabase Client with sessionStorage to allow independent multi-tab testing
 const supabase = isSupabaseConfigured 
-  ? createClient(supabaseUrl, supabaseAnonKey) 
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        storage: typeof window !== 'undefined' ? window.sessionStorage : undefined,
+        persistSession: true,
+        autoRefreshToken: true
+      }
+    }) 
   : null;
 
 // =================================================================
