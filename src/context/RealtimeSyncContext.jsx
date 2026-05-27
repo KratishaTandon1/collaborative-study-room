@@ -156,6 +156,21 @@ export const RealtimeSyncProvider = ({ children }) => {
     profilesChan: null
   });
   const authSubscriptionRef = useRef(null);
+  const userRef = useRef(user);
+  const statsRef = useRef(stats);
+  const timerStateRef = useRef(timerState);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  useEffect(() => {
+    statsRef.current = stats;
+  }, [stats]);
+
+  useEffect(() => {
+    timerStateRef.current = timerState;
+  }, [timerState]);
 
   // =================================================================
   // HYBRID INIT & STATE ROUTING
@@ -299,10 +314,8 @@ export const RealtimeSyncProvider = ({ children }) => {
       const friendsChan = supabase
         .channel('friends-changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
-          supabase.auth.getSession().then(({ data }) => {
-            const userId = data?.session?.user?.id;
-            if (userId) fetchFriendships(userId);
-          });
+          const userId = userRef.current?.id;
+          if (userId) fetchFriendships(userId);
         })
         .subscribe((status, err) => {
           if (err) console.error("friends-changes subscription error:", err);
@@ -315,15 +328,13 @@ export const RealtimeSyncProvider = ({ children }) => {
         .channel('dm-changes')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
           const newDm = payload.new;
-          supabase.auth.getSession().then(({ data }) => {
-            const currUserId = data?.session?.user?.id;
-            if (currUserId && (newDm.sender_id === currUserId || newDm.receiver_id === currUserId)) {
-              setDmMessages(prev => {
-                if (prev.some(d => d.id === newDm.id)) return prev;
-                return [...prev, newDm];
-              });
-            }
-          });
+          const currUserId = userRef.current?.id;
+          if (currUserId && (newDm.sender_id === currUserId || newDm.receiver_id === currUserId)) {
+            setDmMessages(prev => {
+              if (prev.some(d => d.id === newDm.id)) return prev;
+              return [...prev, newDm];
+            });
+          }
         })
         .subscribe((status, err) => {
           if (err) console.error("dm-changes subscription error:", err);
@@ -755,12 +766,12 @@ export const RealtimeSyncProvider = ({ children }) => {
       .subscribe(async (status, err) => {
         if (err) console.error("roomSyncChan subscription error:", err);
         console.log("roomSyncChan subscription status:", status);
-        if (status === 'SUBSCRIBED' && user) {
+        if (status === 'SUBSCRIBED' && userRef.current) {
           await roomSyncChan.track({
-            username: user.name,
+            username: userRef.current.name,
             status: 'Focusing ✍️',
-            avatar_color: user.avatarColor,
-            xp: stats.xp
+            avatar_color: userRef.current.avatarColor,
+            xp: statsRef.current.xp
           });
         }
       });
@@ -1131,22 +1142,26 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    await supabase.from('messages').insert({
-      room_id: roomId,
-      sender_name: 'System',
-      text
-    });
+    try {
+      await supabase.from('messages').insert({
+        room_id: roomId,
+        sender_name: 'System',
+        text
+      });
+    } catch (err) {
+      console.error("Error sending system alert:", err);
+    }
   };
 
   // --- Chat Message Send ---
   const sendChatMessage = async (roomId, text) => {
-    if (!user) return;
+    if (!userRef.current) return;
 
     if (!isSupabaseConfigured) {
       // Local Fallback
       const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const message = {
-        sender: user.name,
+        sender: userRef.current.name,
         text,
         timestamp
       };
@@ -1158,25 +1173,30 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    // Insert to Supabase (Realtime sends it to everyone)
-    await supabase.from('messages').insert({
-      room_id: roomId,
-      sender_id: user.id,
-      sender_name: user.name,
-      text
-    });
+    try {
+      const { error } = await supabase.from('messages').insert({
+        room_id: roomId,
+        sender_id: userRef.current.id,
+        sender_name: userRef.current.name,
+        text
+      });
+      if (error) throw error;
+    } catch (err) {
+      console.error("Error sending chat message:", err);
+      alert("Failed to send message: " + (err.message || err));
+    }
   };
 
   // --- Shared Checklist Item operations ---
   const addTask = async (roomId, text) => {
-    if (!user) return;
+    if (!userRef.current) return;
 
     if (!isSupabaseConfigured) {
       const newTask = {
         id: 't-' + Date.now(),
         text,
         completed: false,
-        user: user.name
+        user: userRef.current.name
       };
       setTasks(prev => {
         const next = [...prev, newTask];
@@ -1189,12 +1209,18 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    await supabase.from('tasks').insert({
-      room_id: roomId,
-      user_id: user.id,
-      user_name: user.name,
-      text
-    });
+    try {
+      const { error } = await supabase.from('tasks').insert({
+        room_id: roomId,
+        user_id: userRef.current.id,
+        user_name: userRef.current.name,
+        text
+      });
+      if (error) throw error;
+    } catch (err) {
+      console.error("Error adding task:", err);
+      alert("Failed to add task: " + (err.message || err));
+    }
   };
 
   const toggleTask = async (roomId, taskId) => {
@@ -1213,10 +1239,16 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    await supabase
-      .from('tasks')
-      .update({ completed: !task.completed })
-      .eq('id', taskId);
+    try {
+      const { error } = await supabase
+        .from('tasks')
+        .update({ completed: !task.completed })
+        .eq('id', taskId);
+      if (error) throw error;
+    } catch (err) {
+      console.error("Error toggling task:", err);
+      alert("Failed to update task: " + (err.message || err));
+    }
   };
 
   const deleteTask = async (roomId, taskId) => {
@@ -1232,10 +1264,16 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    await supabase
-      .from('tasks')
-      .delete()
-      .eq('id', taskId);
+    try {
+      const { error } = await supabase
+        .from('tasks')
+        .delete()
+        .eq('id', taskId);
+      if (error) throw error;
+    } catch (err) {
+      console.error("Error deleting task:", err);
+      alert("Failed to delete task: " + (err.message || err));
+    }
   };
 
   const saveWhiteboard = async (roomId, dataURL) => {
@@ -1250,10 +1288,15 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    await supabase
-      .from('whiteboards')
-      .update({ data_url: dataURL, updated_at: new Date().toISOString() })
-      .eq('room_id', roomId);
+    try {
+      const { error } = await supabase
+        .from('whiteboards')
+        .update({ data_url: dataURL, updated_at: new Date().toISOString() })
+        .eq('room_id', roomId);
+      if (error) throw error;
+    } catch (err) {
+      console.error("Error saving whiteboard:", err);
+    }
   };
 
   // --- Timer Operations ---
@@ -1269,8 +1312,8 @@ export const RealtimeSyncProvider = ({ children }) => {
           payload: { roomId, isRunning: next.isRunning, secondsLeft: next.secondsLeft, mode: next.mode }
         });
         sendSystemAlert(roomId, next.isRunning 
-          ? `${user?.name || 'Someone'} started the focus timer.` 
-          : `${user?.name || 'Someone'} paused the timer.`
+          ? `${userRef.current?.name || 'Someone'} started the focus timer.` 
+          : `${userRef.current?.name || 'Someone'} paused the timer.`
         );
         return next;
       });
@@ -1280,21 +1323,28 @@ export const RealtimeSyncProvider = ({ children }) => {
     const nextIsRunning = !room.timer_is_running;
     const now = new Date().toISOString();
 
-    await supabase
-      .from('rooms')
-      .update({
-        timer_is_running: nextIsRunning,
-        timer_started_at: nextIsRunning ? now : null,
-        timer_paused_seconds_left: nextIsRunning 
-          ? room.timer_paused_seconds_left 
-          : timerState.secondsLeft
-      })
-      .eq('id', roomId);
+    try {
+      const { error } = await supabase
+        .from('rooms')
+        .update({
+          timer_is_running: nextIsRunning,
+          timer_started_at: nextIsRunning ? now : null,
+          timer_paused_seconds_left: nextIsRunning 
+            ? room.timer_paused_seconds_left 
+            : timerStateRef.current.secondsLeft
+        })
+        .eq('id', roomId);
+      
+      if (error) throw error;
 
-    sendSystemAlert(roomId, nextIsRunning 
-      ? `${user?.name || 'Someone'} started the focus timer.` 
-      : `${user?.name || 'Someone'} paused the timer.`
-    );
+      await sendSystemAlert(roomId, nextIsRunning 
+        ? `${userRef.current?.name || 'Someone'} started the focus timer.` 
+        : `${userRef.current?.name || 'Someone'} paused the timer.`
+      );
+    } catch (err) {
+      console.error("Error toggling timer:", err);
+      alert("Failed to toggle timer: " + (err.message || err));
+    }
   };
 
   const resetTimer = async (roomId) => {
@@ -1310,22 +1360,29 @@ export const RealtimeSyncProvider = ({ children }) => {
           type: 'TIMER_TOGGLE',
           payload: { roomId, isRunning: false, secondsLeft: defaultSecs, mode: next.mode }
         });
-        sendSystemAlert(roomId, `${user?.name || 'Someone'} reset the timer.`);
+        sendSystemAlert(roomId, `${userRef.current?.name || 'Someone'} reset the timer.`);
         return next;
       });
       return;
     }
 
-    await supabase
-      .from('rooms')
-      .update({
-        timer_is_running: false,
-        timer_started_at: null,
-        timer_paused_seconds_left: defaultSecs
-      })
-      .eq('id', roomId);
+    try {
+      const { error } = await supabase
+        .from('rooms')
+        .update({
+          timer_is_running: false,
+          timer_started_at: null,
+          timer_paused_seconds_left: defaultSecs
+        })
+        .eq('id', roomId);
+      
+      if (error) throw error;
 
-    sendSystemAlert(roomId, `${user?.name || 'Someone'} reset the timer.`);
+      await sendSystemAlert(roomId, `${userRef.current?.name || 'Someone'} reset the timer.`);
+    } catch (err) {
+      console.error("Error resetting timer:", err);
+      alert("Failed to reset timer: " + (err.message || err));
+    }
   };
 
   const setTimerMode = async (roomId, newMode) => {
@@ -1341,23 +1398,30 @@ export const RealtimeSyncProvider = ({ children }) => {
           type: 'TIMER_TOGGLE',
           payload: { roomId, isRunning: false, secondsLeft: defaultSecs, mode: newMode }
         });
-        sendSystemAlert(roomId, `${user?.name || 'Someone'} changed timer to ${newMode} mode.`);
+        sendSystemAlert(roomId, `${userRef.current?.name || 'Someone'} changed timer to ${newMode} mode.`);
         return next;
       });
       return;
     }
 
-    await supabase
-      .from('rooms')
-      .update({
-        timer_is_running: false,
-        timer_started_at: null,
-        timer_current_mode: newMode,
-        timer_paused_seconds_left: defaultSecs
-      })
-      .eq('id', roomId);
+    try {
+      const { error } = await supabase
+        .from('rooms')
+        .update({
+          timer_is_running: false,
+          timer_started_at: null,
+          timer_current_mode: newMode,
+          timer_paused_seconds_left: defaultSecs
+        })
+        .eq('id', roomId);
+      
+      if (error) throw error;
 
-    sendSystemAlert(roomId, `${user?.name || 'Someone'} changed timer to ${newMode} mode.`);
+      await sendSystemAlert(roomId, `${userRef.current?.name || 'Someone'} changed timer to ${newMode} mode.`);
+    } catch (err) {
+      console.error("Error setting timer mode:", err);
+      alert("Failed to set timer mode: " + (err.message || err));
+    }
   };
 
   // --- Log Offline Hours manually ---
