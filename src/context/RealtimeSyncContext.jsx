@@ -639,6 +639,13 @@ export const RealtimeSyncProvider = ({ children }) => {
         .maybeSingle();
       if (dbBoard) {
         setWhiteboardData(dbBoard.data_url || '');
+      } else {
+        // Create a whiteboard record if missing (e.g. for seed rooms)
+        await supabase.from('whiteboards').insert({
+          room_id: activeRoomId,
+          data_url: ''
+        });
+        setWhiteboardData('');
       }
     };
 
