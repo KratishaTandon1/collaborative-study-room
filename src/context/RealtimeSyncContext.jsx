@@ -332,6 +332,18 @@ export const RealtimeSyncProvider = ({ children }) => {
   const subscribeGlobalChan = () => {
     if (!isSupabaseConfigured || !supabase || globalCleanedUpRef.current) return;
 
+    const expectedTopic = 'realtime:global-changes';
+    const currentChannel = globalChanRef.current;
+
+    if (globalChanStatusRef.current === 'SUBSCRIBED' && currentChannel && currentChannel.topic === expectedTopic) {
+      console.log("[REALTIME-GLOBAL] Already subscribed to global changes. Skipping...");
+      return;
+    }
+    if (globalChanStatusRef.current === 'joining' && currentChannel && currentChannel.topic === expectedTopic) {
+      console.log("[REALTIME-GLOBAL] Subscription in progress for global changes. Skipping...");
+      return;
+    }
+
     if (globalChanRef.current) {
       try {
         supabase.removeChannel(globalChanRef.current);
@@ -341,6 +353,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       globalChanRef.current = null;
     }
 
+    globalChanStatusRef.current = 'joining';
     const chan = supabase.channel('global-changes');
 
     chan
@@ -419,6 +432,18 @@ export const RealtimeSyncProvider = ({ children }) => {
   const subscribeRoomChan = (roomId) => {
     if (!isSupabaseConfigured || !supabase || globalCleanedUpRef.current || !roomId) return;
 
+    const expectedTopic = `realtime:room-sync:${roomId}`;
+    const currentChannel = roomSyncChanRef.current;
+
+    if (roomSyncChanStatusRef.current === 'SUBSCRIBED' && currentChannel && currentChannel.topic === expectedTopic) {
+      console.log(`[REALTIME-ROOM:${roomId}] Already subscribed to room channel. Skipping...`);
+      return;
+    }
+    if (roomSyncChanStatusRef.current === 'joining' && currentChannel && currentChannel.topic === expectedTopic) {
+      console.log(`[REALTIME-ROOM:${roomId}] Subscription in progress for room channel. Skipping...`);
+      return;
+    }
+
     if (roomSyncChanRef.current) {
       try {
         supabase.removeChannel(roomSyncChanRef.current);
@@ -428,6 +453,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       roomSyncChanRef.current = null;
     }
 
+    roomSyncChanStatusRef.current = 'joining';
     const roomSyncChan = supabase.channel(`room-sync:${roomId}`);
 
     const fetchInitialRoomData = async () => {
@@ -618,18 +644,10 @@ export const RealtimeSyncProvider = ({ children }) => {
   // --- SUPABASE PROD MODE ---
   const initSupabase = async () => {
     try {
-      // 1. Session check
-      const { data: { session } } = await supabase.auth.getSession();
-      if (globalCleanedUpRef.current) return;
-      if (session) {
-        await handleSupabaseUserSignIn(session.user);
-        subscribeGlobalChan();
-      }
-      if (globalCleanedUpRef.current) return;
-
-      // 2. Auth state change listener
+      // 1. Auth state change listener (automatically handles initial session)
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (globalCleanedUpRef.current) return;
+        console.log(`[REALTIME-AUTH] Event: ${event}, Session active: ${!!session}`);
         if (session) {
           await handleSupabaseUserSignIn(session.user);
           subscribeGlobalChan();
