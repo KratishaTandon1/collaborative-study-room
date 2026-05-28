@@ -1225,9 +1225,9 @@ export const RealtimeSyncProvider = ({ children }) => {
       setParticipants([]);
     }
 
-    if (isSupabaseConfigured && channelRef.current?.roomSyncChan) {
+    if (isSupabaseConfigured && roomSyncChanRef.current) {
       try {
-        await channelRef.current.roomSyncChan.untrack();
+        await roomSyncChanRef.current.untrack();
       } catch (err) {
         console.warn("Failed presence untrack:", err);
       }
@@ -1245,8 +1245,8 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
-    if (isSupabaseConfigured && channelRef.current?.roomSyncChan && user) {
-      await channelRef.current.roomSyncChan.track({
+    if (isSupabaseConfigured && roomSyncChanRef.current && user) {
+      await roomSyncChanRef.current.track({
         username: user.name,
         status: newStatus,
         avatar_color: user.avatarColor,
