@@ -141,6 +141,12 @@ export const RealtimeSyncProvider = ({ children }) => {
   const [friendsList, setFriendsList] = useState([]);
   const [dmMessages, setDmMessages] = useState([]);
   const [allProfiles, setAllProfiles] = useState([]);
+  const [collaboratorCursors, setCollaboratorCursors] = useState({});
+
+  const collaboratorCursorsRef = useRef({});
+  useEffect(() => {
+    collaboratorCursorsRef.current = collaboratorCursors;
+  }, [collaboratorCursors]);
 
   const [stats, setStats] = useState({
     xp: 320,
@@ -162,6 +168,11 @@ export const RealtimeSyncProvider = ({ children }) => {
   const userRef = useRef(user);
   const statsRef = useRef(stats);
   const timerStateRef = useRef(timerState);
+  const participantsRef = useRef(participants);
+
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
 
   const globalCleanedUpRef = useRef(false);
 
@@ -603,6 +614,26 @@ export const RealtimeSyncProvider = ({ children }) => {
           timer_current_mode: payload.timer_current_mode,
           timer_mode: payload.timer_mode
         } : r));
+      })
+      .on('broadcast', { event: 'CURSOR_MOVE' }, ({ payload }) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        setCollaboratorCursors(prev => ({
+          ...prev,
+          [payload.username]: {
+            x: payload.x,
+            y: payload.y,
+            avatarColor: payload.avatarColor,
+            updatedAt: Date.now()
+          }
+        }));
+      })
+      .on('broadcast', { event: 'TIMER_TICK' }, ({ payload }) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        const list = participantsRef.current;
+        const isHost = list.length > 0 && list[0].name === userRef.current?.name;
+        if (!isHost) {
+          setTimerState(prev => ({ ...prev, secondsLeft: payload.secondsLeft }));
+        }
       })
       .on('presence', { event: 'sync' }, () => {
         if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
@@ -1053,6 +1084,22 @@ export const RealtimeSyncProvider = ({ children }) => {
               setParticipants(prev => prev.map(p => p.name === payload.username ? { ...p, status: payload.status } : p));
             } else if (type === 'PARTICIPANT_LEAVE' && payload.roomId === activeRoomId) {
               setParticipants(prev => prev.filter(p => p.name !== payload.username));
+            } else if (type === 'CURSOR_MOVE' && payload.roomId === activeRoomId) {
+              setCollaboratorCursors(prev => ({
+                ...prev,
+                [payload.username]: {
+                  x: payload.x,
+                  y: payload.y,
+                  avatarColor: payload.avatarColor,
+                  updatedAt: Date.now()
+                }
+              }));
+            } else if (type === 'TIMER_TICK' && payload.roomId === activeRoomId) {
+              const list = participantsRef.current;
+              const isHost = list.length > 0 && list[0].name === userRef.current?.name;
+              if (!isHost) {
+                setTimerState(prev => ({ ...prev, secondsLeft: payload.secondsLeft }));
+              }
             }
           };
 
@@ -1181,11 +1228,22 @@ export const RealtimeSyncProvider = ({ children }) => {
         // Offline ticking logic
         setTimerState(prev => {
           if (!prev.isRunning) return prev;
+          const nextSecs = prev.timerMode === 'stopwatch' ? prev.secondsLeft + 1 : Math.max(0, prev.secondsLeft - 1);
+
+          const list = participantsRef.current;
+          const isHost = list.length > 0 && list[0].name === userRef.current?.name;
+          if (isHost) {
+            localBroadcastChannelRef.current?.postMessage({
+              type: 'TIMER_TICK',
+              payload: { roomId: activeRoomId, secondsLeft: nextSecs }
+            });
+          }
+
           if (prev.timerMode === 'stopwatch') {
-            return { ...prev, secondsLeft: prev.secondsLeft + 1 };
+            return { ...prev, secondsLeft: nextSecs };
           } else {
             if (prev.secondsLeft > 0) {
-              return { ...prev, secondsLeft: prev.secondsLeft - 1 };
+              return { ...prev, secondsLeft: nextSecs };
             } else {
               // Complete offline timer
               const nextMode = prev.mode === 'focus' ? 'break' : 'focus';
@@ -1213,6 +1271,16 @@ export const RealtimeSyncProvider = ({ children }) => {
           const secondsRemaining = duration - elapsedSeconds;
 
           if (secondsRemaining > 0) {
+            const list = participantsRef.current;
+            const isHost = list.length > 0 && list[0].name === userRef.current?.name;
+            if (isHost && roomSyncChanRef.current && secondsRemaining % 3 === 0) {
+              roomSyncChanRef.current.send({
+                type: 'broadcast',
+                event: 'TIMER_TICK',
+                payload: { secondsLeft: secondsRemaining }
+              });
+            }
+
             setTimerState({
               isRunning: true,
               secondsLeft: secondsRemaining,
@@ -1226,9 +1294,21 @@ export const RealtimeSyncProvider = ({ children }) => {
           }
         } else {
           // Stopwatch counts up
+          const nextSecs = elapsedSeconds + (room.timer_paused_seconds_left || 0);
+          
+          const list = participantsRef.current;
+          const isHost = list.length > 0 && list[0].name === userRef.current?.name;
+          if (isHost && roomSyncChanRef.current && nextSecs % 3 === 0) {
+            roomSyncChanRef.current.send({
+              type: 'broadcast',
+              event: 'TIMER_TICK',
+              payload: { secondsLeft: nextSecs }
+            });
+          }
+
           setTimerState({
             isRunning: true,
-            secondsLeft: elapsedSeconds + (room.timer_paused_seconds_left || 0),
+            secondsLeft: nextSecs,
             duration: 0,
             mode: 'focus',
             timerMode: 'stopwatch'
@@ -1882,6 +1962,33 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
   };
 
+  const broadcastCursorPosition = (roomId, x, y) => {
+    if (!userRef.current) return;
+    const payload = {
+      roomId,
+      x,
+      y,
+      username: userRef.current.name,
+      avatarColor: userRef.current.avatarColor
+    };
+
+    if (!isSupabaseConfigured) {
+      localBroadcastChannelRef.current?.postMessage({
+        type: 'CURSOR_MOVE',
+        payload
+      });
+      return;
+    }
+
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'CURSOR_MOVE',
+        payload
+      });
+    }
+  };
+
   // --- Log Offline Hours manually ---
   const addManualSession = async (minutes, topic) => {
     await awardXPAndStats(minutes, `Self Study: ${topic}`);
@@ -2111,7 +2218,9 @@ export const RealtimeSyncProvider = ({ children }) => {
         acceptFriendRequest,
         cancelOrRemoveFriend,
         sendDirectMessage,
-        isSupabaseConfigured
+        isSupabaseConfigured,
+        collaboratorCursors,
+        broadcastCursorPosition
       }}
     >
       {children}

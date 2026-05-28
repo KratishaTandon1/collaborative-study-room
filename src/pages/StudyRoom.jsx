@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/purity */
 import { useState, useEffect, useRef } from 'react';
 import { useRealtimeSync } from '../context/RealtimeSyncContext';
 import { 
@@ -28,7 +29,9 @@ export default function StudyRoom() {
     setTimerMode,
     friendsList,
     allProfiles,
-    sendFriendRequest
+    sendFriendRequest,
+    collaboratorCursors,
+    broadcastCursorPosition
   } = useRealtimeSync();
 
   const currentRoom = rooms.find(r => r.id === activeRoomId);
@@ -204,10 +207,15 @@ export default function StudyRoom() {
   };
 
   const draw = (e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const coords = getCoordinates(e);
+    broadcastCursorPosition(activeRoomId, coords.x, coords.y);
+
     if (!isDrawing) return;
     e.preventDefault();
-    const coords = getCoordinates(e);
-    const ctx = canvasRef.current.getContext('2d');
+    const ctx = canvas.getContext('2d');
     ctx.lineTo(coords.x, coords.y);
     ctx.stroke();
   };
@@ -517,17 +525,63 @@ export default function StudyRoom() {
                     </div>
                   </div>
 
-                  <canvas
-                    ref={canvasRef}
-                    onMouseDown={startDrawing}
-                    onMouseMove={draw}
-                    onMouseUp={stopDrawing}
-                    onMouseLeave={stopDrawing}
-                    onTouchStart={startDrawing}
-                    onTouchMove={draw}
-                    onTouchEnd={stopDrawing}
-                    style={{ display: 'block', cursor: 'crosshair', touchAction: 'none' }}
-                  />
+                  <div style={{ position: 'relative', width: '100%', height: '250px', overflow: 'hidden' }}>
+                    <canvas
+                      ref={canvasRef}
+                      onMouseDown={startDrawing}
+                      onMouseMove={draw}
+                      onMouseUp={stopDrawing}
+                      onMouseLeave={stopDrawing}
+                      onTouchStart={startDrawing}
+                      onTouchMove={draw}
+                      onTouchEnd={stopDrawing}
+                      style={{ display: 'block', cursor: 'crosshair', touchAction: 'none' }}
+                    />
+                    {Object.entries(collaboratorCursors)
+                      .filter(([username, data]) => username !== user?.name && Date.now() - data.updatedAt < 3000)
+                      .map(([username, data]) => (
+                        <div
+                          key={username}
+                          style={{
+                            position: 'absolute',
+                            left: data.x,
+                            top: data.y,
+                            pointerEvents: 'none',
+                            zIndex: 10,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'flex-start',
+                            transform: 'translate(-2px, -2px)',
+                            transition: 'all 0.08s ease-out'
+                          }}
+                        >
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}>
+                            <path
+                              d="M5.65376 12.3825L19.3462 5.53625C19.9862 5.21625 20.725 5.80125 20.5288 6.495L17.1513 18.4237C16.9738 19.0537 16.1425 19.2075 15.7513 18.6825L12.4413 14.2387L8.98376 17.6962C8.58376 18.0962 7.89751 17.8125 7.89751 17.2462V13.805L5.80126 13.0675C5.22251 12.8625 5.12751 12.0825 5.65376 12.3825Z"
+                              fill={data.avatarColor || '#06b6d4'}
+                              stroke="white"
+                              strokeWidth="2"
+                            />
+                          </svg>
+                          <div
+                            style={{
+                              background: data.avatarColor || '#06b6d4',
+                              color: 'white',
+                              fontSize: '0.65rem',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              whiteSpace: 'nowrap',
+                              fontWeight: 600,
+                              boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                              marginLeft: '8px',
+                              marginTop: '-2px'
+                            }}
+                          >
+                            {username}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
                 </div>
               </div>
 
