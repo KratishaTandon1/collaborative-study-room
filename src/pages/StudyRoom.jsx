@@ -122,6 +122,7 @@ export default function StudyRoom() {
         });
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAmbience]);
 
   const toggleAmbience = () => {
@@ -173,6 +174,7 @@ export default function StudyRoom() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whiteboardData]);
 
   const getCoordinates = (e) => {

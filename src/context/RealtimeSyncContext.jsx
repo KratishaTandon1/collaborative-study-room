@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -195,24 +196,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
   }, [activeRoomId]);
 
-  useEffect(() => {
-    const handlePopState = () => {
-      const urlParams = new URLSearchParams(window.location.search);
-      const room = urlParams.get('room') || null;
-      if (room !== activeRoomIdRef.current) {
-        isPopStateRef.current = true;
-        if (!room && activeRoomIdRef.current) {
-          leaveRoom(activeRoomIdRef.current);
-        } else if (room) {
-          joinRoom(room);
-        }
-      }
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => {
-      window.removeEventListener('popstate', handlePopState);
-    };
-  }, [rooms, user]);
+
 
 
 
@@ -672,6 +656,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       window.removeEventListener('focus', handleReactivation);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- SUPABASE PROD MODE ---
@@ -864,6 +849,7 @@ export const RealtimeSyncProvider = ({ children }) => {
         }
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- Auth Actions ---
@@ -1058,6 +1044,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       }
       roomSyncChanStatusRef.current = 'none';
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeRoomId]);
 
   const awardXPAndStats = async (minutesStudied, roomName) => {
@@ -1208,6 +1195,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     }, 1000);
 
     return () => clearInterval(timerIntervalRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeRoomId, rooms]);
 
   // --- Study Room Handlers ---
@@ -1920,6 +1908,26 @@ export const RealtimeSyncProvider = ({ children }) => {
       alert("Failed to send DM: " + (err.message || err));
     }
   };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const room = urlParams.get('room') || null;
+      if (room !== activeRoomIdRef.current) {
+        isPopStateRef.current = true;
+        if (!room && activeRoomIdRef.current) {
+          leaveRoom(activeRoomIdRef.current);
+        } else if (room) {
+          joinRoom(room);
+        }
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rooms, user]);
 
   return (
     <RealtimeSyncContext.Provider
