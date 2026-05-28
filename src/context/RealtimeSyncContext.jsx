@@ -296,6 +296,18 @@ export const RealtimeSyncProvider = ({ children }) => {
     if (data) setAllProfiles(data);
   };
 
+  const broadcastGlobal = (event, payload) => {
+    if (isSupabaseConfigured && globalChanRef.current && globalChanStatusRef.current === 'SUBSCRIBED') {
+      globalChanRef.current.send({
+        type: 'broadcast',
+        event,
+        payload
+      }).catch(err => {
+        console.warn(`[REALTIME-GLOBAL] Broadcast failed for ${event}:`, err);
+      });
+    }
+  };
+
   // --- REAL-TIME SUBSCRIPTION FUNCTIONS (SELF-HEALING & MULTIPLEXED) ---
   const subscribeGlobalChan = () => {
     if (!isSupabaseConfigured || !supabase || globalCleanedUpRef.current) return;
@@ -357,6 +369,41 @@ export const RealtimeSyncProvider = ({ children }) => {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
         if (globalCleanedUpRef.current) return;
+        fetchAllProfiles();
+      })
+      .on('broadcast', { event: 'FRIENDS_UPDATE' }, ({ payload }) => {
+        if (globalCleanedUpRef.current) return;
+        const userId = userRef.current?.id;
+        if (userId && (payload.userId1 === userId || payload.userId2 === userId)) {
+          console.log("[REALTIME-GLOBAL] Received broadcast FRIENDS_UPDATE, fetching friendships...");
+          fetchFriendships(userId);
+        }
+      })
+      .on('broadcast', { event: 'DM_MSG' }, ({ payload }) => {
+        if (globalCleanedUpRef.current) return;
+        const currUserId = userRef.current?.id;
+        if (currUserId && (payload.sender_id === currUserId || payload.receiver_id === currUserId)) {
+          console.log("[REALTIME-GLOBAL] Received broadcast DM_MSG, appending...");
+          setDmMessages(prev => {
+            if (prev.some(d => d.id === payload.id)) return prev;
+            const matchIndex = prev.findIndex(d => 
+              String(d.id).startsWith('temp-dm-') && 
+              d.sender_id === payload.sender_id && 
+              d.receiver_id === payload.receiver_id && 
+              d.text === payload.text
+            );
+            if (matchIndex !== -1) {
+              const next = [...prev];
+              next[matchIndex] = payload;
+              return next;
+            }
+            return [...prev, payload];
+          });
+        }
+      })
+      .on('broadcast', { event: 'PROFILE_UPDATE' }, () => {
+        if (globalCleanedUpRef.current) return;
+        console.log("[REALTIME-GLOBAL] Received broadcast PROFILE_UPDATE, refetching profiles...");
         fetchAllProfiles();
       })
       .subscribe(async (status, err) => {
@@ -829,6 +876,7 @@ export const RealtimeSyncProvider = ({ children }) => {
 
       if (!insertError && insertedProfile) {
         profile = insertedProfile;
+        broadcastGlobal('PROFILE_UPDATE', { userId: supabaseUser.id });
       } else {
         console.error("Failed to insert fallback profile:", insertError);
       }
@@ -1170,6 +1218,12 @@ export const RealtimeSyncProvider = ({ children }) => {
           completed_sessions: updatedSessions
         })
         .eq('id', user.id);
+
+      // Fetch all profiles locally
+      await fetchAllProfiles();
+
+      // Broadcast update
+      broadcastGlobal('PROFILE_UPDATE', { userId: user.id });
     }
   };
 
@@ -2075,6 +2129,12 @@ export const RealtimeSyncProvider = ({ children }) => {
       });
 
     if (insertErr) throw insertErr;
+
+    // Fetch friendships for the sender immediately
+    await fetchFriendships(userRef.current.id);
+
+    // Broadcast change
+    broadcastGlobal('FRIENDS_UPDATE', { userId1: id1, userId2: id2 });
   };
 
   const acceptFriendRequest = async (requestId) => {
@@ -2088,12 +2148,23 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
+    const req = friendsList.find(f => f.id === requestId);
+
     const { error } = await supabase
       .from('friends')
       .update({ status: 'accepted' })
       .eq('id', requestId);
 
     if (error) throw error;
+
+    // Fetch friendships for the sender/accepter immediately
+    if (userRef.current) {
+      await fetchFriendships(userRef.current.id);
+    }
+
+    if (req) {
+      broadcastGlobal('FRIENDS_UPDATE', { userId1: req.user_id_1, userId2: req.user_id_2 });
+    }
   };
 
   const cancelOrRemoveFriend = async (requestId) => {
@@ -2107,12 +2178,23 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
+    const req = friendsList.find(f => f.id === requestId);
+
     const { error } = await supabase
       .from('friends')
       .delete()
       .eq('id', requestId);
 
     if (error) throw error;
+
+    // Fetch friendships for the sender/canceller immediately
+    if (userRef.current) {
+      await fetchFriendships(userRef.current.id);
+    }
+
+    if (req) {
+      broadcastGlobal('FRIENDS_UPDATE', { userId1: req.user_id_1, userId2: req.user_id_2 });
+    }
   };
 
   const sendDirectMessage = async (receiverId, text, isInvite = false, roomId = null) => {
@@ -2138,7 +2220,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     try {
-      const { error } = await supabase
+      const { data: dbDm, error } = await supabase
         .from('direct_messages')
         .insert({
           sender_id: userRef.current.id,
@@ -2147,9 +2229,20 @@ export const RealtimeSyncProvider = ({ children }) => {
           text,
           is_invite: isInvite,
           room_id: roomId
-        });
+        })
+        .select()
+        .maybeSingle();
 
       if (error) throw error;
+
+      if (dbDm) {
+        setDmMessages(prev => {
+          const filtered = prev.filter(d => d.id !== tempId);
+          if (filtered.some(d => d.id === dbDm.id)) return filtered;
+          return [...filtered, dbDm];
+        });
+        broadcastGlobal('DM_MSG', dbDm);
+      }
     } catch (err) {
       // Revert optimistic DM
       setDmMessages(prev => prev.filter(d => d.id !== tempId));
