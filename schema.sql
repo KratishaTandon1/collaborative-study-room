@@ -214,3 +214,13 @@ values
     'https://images.unsplash.com/photo-1507842217343-583bb7270b66?q=80&w=600&auto=format&fit=crop'
   )
 on conflict (id) do nothing;
+
+-- =================================================================
+-- ENABLE REALTIME REPLICATION FOR TABLES
+-- =================================================================
+-- Enable realtime database replication on critical tables to sync
+-- postgres changes even if Phoenix channel broadcasts fail.
+alter publication supabase_realtime add table public.rooms;
+alter publication supabase_realtime add table public.messages;
+alter publication supabase_realtime add table public.tasks;
+alter publication supabase_realtime add table public.whiteboards;

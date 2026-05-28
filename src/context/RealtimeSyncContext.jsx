@@ -567,6 +567,43 @@ export const RealtimeSyncProvider = ({ children }) => {
         if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
         setWhiteboardData(payload.new.data_url || '');
       })
+      .on('broadcast', { event: 'CHAT_MSG' }, ({ payload }) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        setChatMessages(prev => {
+          if (prev.some(m => m.id === payload.id)) return prev;
+          const matchIndex = prev.findIndex(m => 
+            String(m.id).startsWith('temp-msg-') && 
+            m.text === payload.text && 
+            m.sender === payload.sender
+          );
+          if (matchIndex !== -1) {
+            const next = [...prev];
+            next[matchIndex] = payload;
+            return next;
+          }
+          return [...prev, payload];
+        });
+      })
+      .on('broadcast', { event: 'TASK_UPDATE' }, ({ payload }) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        setTasks(payload.tasks);
+      })
+      .on('broadcast', { event: 'CANVAS_SYNC' }, ({ payload }) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        setWhiteboardData(payload.dataURL);
+      })
+      .on('broadcast', { event: 'TIMER_SYNC' }, ({ payload }) => {
+        if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
+        setRooms(prev => prev.map(r => r.id === roomId ? {
+          ...r,
+          timer_is_running: payload.timer_is_running,
+          timer_started_at: payload.timer_started_at,
+          timer_paused_seconds_left: payload.timer_paused_seconds_left,
+          timer_duration: payload.timer_duration,
+          timer_current_mode: payload.timer_current_mode,
+          timer_mode: payload.timer_mode
+        } : r));
+      })
       .on('presence', { event: 'sync' }, () => {
         if (globalCleanedUpRef.current || activeRoomIdRef.current !== roomId) return;
         const state = roomSyncChan.presenceState();
@@ -1097,6 +1134,21 @@ export const RealtimeSyncProvider = ({ children }) => {
 
     // Only update if timer is running in local memory to prevent infinite loop races
     if (timerStateRef.current.isRunning) {
+      if (isSupabaseConfigured && roomSyncChanRef.current) {
+        roomSyncChanRef.current.send({
+          type: 'broadcast',
+          event: 'TIMER_SYNC',
+          payload: {
+            timer_is_running: false,
+            timer_started_at: null,
+            timer_paused_seconds_left: nextDuration,
+            timer_duration: room.timer_duration,
+            timer_current_mode: nextMode,
+            timer_mode: room.timer_mode
+          }
+        });
+      }
+
       await supabase
         .from('rooms')
         .update({
@@ -1433,6 +1485,14 @@ export const RealtimeSyncProvider = ({ children }) => {
       return;
     }
 
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'CHAT_MSG',
+        payload: tempMsg
+      });
+    }
+
     try {
       const { error } = await supabase.from('messages').insert({
         room_id: roomId,
@@ -1460,14 +1520,23 @@ export const RealtimeSyncProvider = ({ children }) => {
       completed: false,
       user: userRef.current.name
     };
-    setTasks(prev => [...prev, tempTask]);
+    const updatedTasks = [...tasks, tempTask];
+    setTasks(updatedTasks);
 
     if (!isSupabaseConfigured) {
       localBroadcastChannelRef.current?.postMessage({
         type: 'TASK_UPDATE',
-        payload: { roomId, tasks: [...tasks, tempTask] }
+        payload: { roomId, tasks: updatedTasks }
       });
       return;
+    }
+
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'TASK_UPDATE',
+        payload: { tasks: updatedTasks }
+      });
     }
 
     try {
@@ -1491,14 +1560,23 @@ export const RealtimeSyncProvider = ({ children }) => {
     if (!task) return;
 
     // Optimistic toggle
-    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t));
+    const updatedTasks = tasks.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t);
+    setTasks(updatedTasks);
 
     if (!isSupabaseConfigured) {
       localBroadcastChannelRef.current?.postMessage({
         type: 'TASK_UPDATE',
-        payload: { roomId, tasks: tasks.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t) }
+        payload: { roomId, tasks: updatedTasks }
       });
       return;
+    }
+
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'TASK_UPDATE',
+        payload: { tasks: updatedTasks }
+      });
     }
 
     try {
@@ -1519,14 +1597,23 @@ export const RealtimeSyncProvider = ({ children }) => {
     const task = tasks.find(t => t.id === taskId);
 
     // Optimistic delete
-    setTasks(prev => prev.filter(t => t.id !== taskId));
+    const updatedTasks = tasks.filter(t => t.id !== taskId);
+    setTasks(updatedTasks);
 
     if (!isSupabaseConfigured) {
       localBroadcastChannelRef.current?.postMessage({
         type: 'TASK_UPDATE',
-        payload: { roomId, tasks: tasks.filter(t => t.id !== taskId) }
+        payload: { roomId, tasks: updatedTasks }
       });
       return;
+    }
+
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'TASK_UPDATE',
+        payload: { tasks: updatedTasks }
+      });
     }
 
     try {
@@ -1553,6 +1640,14 @@ export const RealtimeSyncProvider = ({ children }) => {
         payload: { roomId, dataURL }
       });
       return;
+    }
+
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'CANVAS_SYNC',
+        payload: { dataURL }
+      });
     }
 
     try {
@@ -1599,6 +1694,23 @@ export const RealtimeSyncProvider = ({ children }) => {
         ? r.timer_paused_seconds_left 
         : timerStateRef.current.secondsLeft
     } : r));
+
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'TIMER_SYNC',
+        payload: {
+          timer_is_running: nextIsRunning,
+          timer_started_at: nextIsRunning ? now : null,
+          timer_paused_seconds_left: nextIsRunning 
+            ? room.timer_paused_seconds_left 
+            : timerStateRef.current.secondsLeft,
+          timer_duration: room.timer_duration,
+          timer_current_mode: room.timer_current_mode,
+          timer_mode: room.timer_mode
+        }
+      });
+    }
 
     try {
       const { error } = await supabase
@@ -1658,6 +1770,21 @@ export const RealtimeSyncProvider = ({ children }) => {
       timer_paused_seconds_left: defaultSecs
     } : r));
 
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'TIMER_SYNC',
+        payload: {
+          timer_is_running: false,
+          timer_started_at: null,
+          timer_paused_seconds_left: defaultSecs,
+          timer_duration: room.timer_duration,
+          timer_current_mode: room.timer_current_mode,
+          timer_mode: room.timer_mode
+        }
+      });
+    }
+
     try {
       const { error } = await supabase
         .from('rooms')
@@ -1711,6 +1838,21 @@ export const RealtimeSyncProvider = ({ children }) => {
       timer_current_mode: newMode,
       timer_paused_seconds_left: defaultSecs
     } : r));
+
+    if (roomSyncChanRef.current) {
+      roomSyncChanRef.current.send({
+        type: 'broadcast',
+        event: 'TIMER_SYNC',
+        payload: {
+          timer_is_running: false,
+          timer_started_at: null,
+          timer_paused_seconds_left: defaultSecs,
+          timer_duration: room.timer_duration,
+          timer_current_mode: newMode,
+          timer_mode: room.timer_mode
+        }
+      });
+    }
 
     try {
       const { error } = await supabase
