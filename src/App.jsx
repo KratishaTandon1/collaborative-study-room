@@ -1,9 +1,8 @@
-import React from 'react';
 import { RealtimeSyncProvider, useRealtimeSync } from './context/RealtimeSyncContext';
 import Auth from './pages/Auth';
 import Dashboard from './pages/Dashboard';
 import StudyRoom from './pages/StudyRoom';
-import { BookOpen, LogOut, Flame, Trophy, User } from 'lucide-react';
+import { BookOpen, LogOut, Flame, Trophy } from 'lucide-react';
 
 function AppContent() {
   const { user, logout, stats, activeRoomId, loading } = useRealtimeSync();

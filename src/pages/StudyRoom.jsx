@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRealtimeSync } from '../context/RealtimeSyncContext';
 import { 
   ArrowLeft, Play, Pause, RotateCcw, Send, CheckSquare, Square, 
-  Trash2, Plus, Volume2, VolumeX, Edit3, Trash, Users, Disc, Paintbrush, 
-  Sparkles, Maximize2, Minimize2 
+  Trash2, Plus, Volume2, VolumeX, Trash, Users, Disc, Paintbrush, 
+  Maximize2, Minimize2 
 } from 'lucide-react';
 
 export default function StudyRoom() {
@@ -68,19 +68,7 @@ export default function StudyRoom() {
     }
   };
 
-  if (!currentRoom) {
-    return (
-      <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', maxWidth: '500px', margin: '60px auto', border: '1px solid rgba(244,63,94,0.2)' }}>
-        <h2 style={{ color: 'var(--color-accent)', marginBottom: '12px', fontFamily: 'var(--font-display)', fontSize: '1.6rem' }}>Den Not Found</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', fontSize: '0.95rem' }}>
-          The study room you are trying to join does not exist, has been deleted, or the link is incorrect.
-        </p>
-        <button className="btn btn-primary" onClick={() => leaveRoom(activeRoomId)} style={{ padding: '10px 20px', margin: '0 auto' }}>
-          Go to Dashboard
-        </button>
-      </div>
-    );
-  }
+
 
   // States
   const [inputText, setInputText] = useState('');
@@ -270,6 +258,20 @@ export default function StudyRoom() {
     ? (timerState.secondsLeft / totalDuration) * 100 
     : 100;
   const strokeDashoffset = 728.8 - (728.8 * progressPercent) / 100; // SVG circle perimeter 2 * PI * r (r=116)
+
+  if (!currentRoom) {
+    return (
+      <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', maxWidth: '500px', margin: '60px auto', border: '1px solid rgba(244,63,94,0.2)' }}>
+        <h2 style={{ color: 'var(--color-accent)', marginBottom: '12px', fontFamily: 'var(--font-display)', fontSize: '1.6rem' }}>Den Not Found</h2>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', fontSize: '0.95rem' }}>
+          The study room you are trying to join does not exist, has been deleted, or the link is incorrect.
+        </p>
+        <button className="btn btn-primary" onClick={() => leaveRoom(activeRoomId)} style={{ padding: '10px 20px', margin: '0 auto' }}>
+          Go to Dashboard
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>

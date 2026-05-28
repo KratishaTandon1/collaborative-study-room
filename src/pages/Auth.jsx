@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
-import { useRealtimeSync, isSupabaseConfigured } from '../context/RealtimeSyncContext';
-import { BookOpen, User, Lock, Mail, ArrowRight, ShieldCheck, Sparkles } from 'lucide-react';
+import { useState } from 'react';
+import { useRealtimeSync } from '../context/RealtimeSyncContext';
+import { BookOpen, User, Lock, Mail, ArrowRight, ShieldCheck } from 'lucide-react';
 
 export default function Auth() {
-  const { signUp, loginWithPassword, login, authError } = useRealtimeSync();
+  const { signUp, loginWithPassword, login, authError, isSupabaseConfigured } = useRealtimeSync();
   const [isSignUpMode, setIsSignUpMode] = useState(false);
   
   // Form states

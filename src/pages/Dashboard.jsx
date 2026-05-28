@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRealtimeSync } from '../context/RealtimeSyncContext';
 import { 
-  Search, Plus, Users, Clock, Hash, Trophy, Calendar, 
-  Sparkles, Award, ArrowRight, BookOpen, Music, CheckCircle2, UserPlus, MessageSquare, Send, Trash
+  Search, Plus, Users, Clock, Calendar, 
+  Sparkles, Award, ArrowRight, CheckCircle2, MessageSquare, Send, Trash
 } from 'lucide-react';
 
 export default function Dashboard() {

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
 const RealtimeSyncContext = createContext();
@@ -13,7 +13,7 @@ const hasValidKeys = supabaseUrl &&
                      !supabaseUrl.includes('your-project-id') && 
                      !supabaseUrl.includes('placeholder');
 
-export const isSupabaseConfigured = !!hasValidKeys;
+const isSupabaseConfigured = !!hasValidKeys;
 
 // Initialize Supabase Client with sessionStorage to allow independent multi-tab testing
 const supabase = isSupabaseConfigured 
@@ -118,6 +118,10 @@ const formatTimestamp = (dateStr) => {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
+const generateRandomColor = () => {
+  return '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
+};
+
 export const RealtimeSyncProvider = ({ children }) => {
   // Common states
   const [user, setUser] = useState(null);
@@ -176,34 +180,6 @@ export const RealtimeSyncProvider = ({ children }) => {
     activeRoomIdRef.current = activeRoomId;
   }, [activeRoomId]);
 
-  // =================================================================
-  // HYBRID INIT & STATE ROUTING
-  // =================================================================
-
-  useEffect(() => {
-    globalCleanedUpRef.current = false;
-    if (isSupabaseConfigured) {
-      initSupabase();
-    } else {
-      initLocalFallback();
-    }
-
-    return () => {
-      globalCleanedUpRef.current = true;
-
-      if (isSupabaseConfigured && supabase) {
-        if (globalChanRef.current) {
-          try { supabase.removeChannel(globalChanRef.current); } catch (e) {}
-        }
-        if (roomSyncChanRef.current) {
-          try { supabase.removeChannel(roomSyncChanRef.current); } catch (e) {}
-        }
-        if (authSubscriptionRef.current) {
-          try { authSubscriptionRef.current.unsubscribe(); } catch (e) {}
-        }
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (activeRoomId) {
@@ -213,65 +189,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
   }, [activeRoomId]);
 
-  // --- CONNECTION HEALTH MONITOR & REACTIVATION LIFECYCLE ---
-  useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
 
-    // 1. Periodic health check every 8 seconds
-    const healthCheckInterval = setInterval(() => {
-      if (globalCleanedUpRef.current) return;
-      if (!userRef.current) return; // Only monitor if user is logged in
-
-      const globalStatus = globalChanStatusRef.current;
-      console.log(`[HEALTHCHECK] Global connection status: ${globalStatus}`);
-      if (globalStatus !== 'SUBSCRIBED' && globalStatus !== 'joining') {
-        console.warn(`[HEALTHCHECK] Global connection is not active (${globalStatus}). Recovering channel...`);
-        subscribeGlobalChan();
-      }
-
-      const activeRoom = activeRoomIdRef.current;
-      if (activeRoom) {
-        const roomStatus = roomSyncChanStatusRef.current;
-        console.log(`[HEALTHCHECK] Room ${activeRoom} connection status: ${roomStatus}`);
-        if (roomStatus !== 'SUBSCRIBED' && roomStatus !== 'joining') {
-          console.warn(`[HEALTHCHECK] Room channel is not active (${roomStatus}). Recovering channel...`);
-          subscribeRoomChan(activeRoom);
-        }
-      }
-    }, 8000);
-
-    // 2. Reactivate on focus or visibility change
-    const handleReactivation = () => {
-      if (globalCleanedUpRef.current) return;
-      if (!userRef.current) return; // Only reactivate if user is logged in
-      console.log("[REACTIVATION] Tab became active. Checking connection health...");
-
-      if (globalChanStatusRef.current !== 'SUBSCRIBED') {
-        console.log("[REACTIVATION] Global channel is not active. Recovering...");
-        subscribeGlobalChan();
-      }
-
-      const activeRoom = activeRoomIdRef.current;
-      if (activeRoom && roomSyncChanStatusRef.current !== 'SUBSCRIBED') {
-        console.log("[REACTIVATION] Room channel is not active. Recovering...");
-        subscribeRoomChan(activeRoom);
-      }
-    };
-
-    window.addEventListener('focus', handleReactivation);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        handleReactivation();
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      clearInterval(healthCheckInterval);
-      window.removeEventListener('focus', handleReactivation);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, []);
 
   // --- LOCAL FALLBACK MODE ---
   const initLocalFallback = () => {
@@ -328,6 +246,36 @@ export const RealtimeSyncProvider = ({ children }) => {
     setLoading(false);
   };
 
+  const fetchFriendships = async (currUserId) => {
+    if (!isSupabaseConfigured) return;
+    const { data } = await supabase
+      .from('friends')
+      .select('*')
+      .or(`user_id_1.eq.${currUserId},user_id_2.eq.${currUserId}`);
+    if (globalCleanedUpRef.current) return;
+    if (data) setFriendsList(data);
+  };
+
+  const fetchDirectMessages = async (currUserId) => {
+    if (!isSupabaseConfigured) return;
+    const { data } = await supabase
+      .from('direct_messages')
+      .select('*')
+      .or(`sender_id.eq.${currUserId},receiver_id.eq.${currUserId}`)
+      .order('created_at', { ascending: true });
+    if (globalCleanedUpRef.current) return;
+    if (data) setDmMessages(data);
+  };
+
+  const fetchAllProfiles = async () => {
+    if (!isSupabaseConfigured) return;
+    const { data } = await supabase
+      .from('profiles')
+      .select('id, username, avatar_color, xp');
+    if (globalCleanedUpRef.current) return;
+    if (data) setAllProfiles(data);
+  };
+
   // --- REAL-TIME SUBSCRIPTION FUNCTIONS (SELF-HEALING & MULTIPLEXED) ---
   const subscribeGlobalChan = () => {
     if (!isSupabaseConfigured || !supabase || globalCleanedUpRef.current) return;
@@ -371,7 +319,7 @@ export const RealtimeSyncProvider = ({ children }) => {
           setRooms(prev => prev.filter(r => r.id !== payload.old.id));
         }
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, () => {
         if (globalCleanedUpRef.current) return;
         const userId = userRef.current?.id;
         if (userId) fetchFriendships(userId);
@@ -387,7 +335,7 @@ export const RealtimeSyncProvider = ({ children }) => {
           });
         }
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
         if (globalCleanedUpRef.current) return;
         fetchAllProfiles();
       })
@@ -641,6 +589,66 @@ export const RealtimeSyncProvider = ({ children }) => {
     roomSyncChanRef.current = roomSyncChan;
   };
 
+  // --- CONNECTION HEALTH MONITOR & REACTIVATION LIFECYCLE ---
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    // 1. Periodic health check every 8 seconds
+    const healthCheckInterval = setInterval(() => {
+      if (globalCleanedUpRef.current) return;
+      if (!userRef.current) return; // Only monitor if user is logged in
+
+      const globalStatus = globalChanStatusRef.current;
+      console.log(`[HEALTHCHECK] Global connection status: ${globalStatus}`);
+      if (globalStatus !== 'SUBSCRIBED' && globalStatus !== 'joining') {
+        console.warn(`[HEALTHCHECK] Global connection is not active (${globalStatus}). Recovering channel...`);
+        subscribeGlobalChan();
+      }
+
+      const activeRoom = activeRoomIdRef.current;
+      if (activeRoom) {
+        const roomStatus = roomSyncChanStatusRef.current;
+        console.log(`[HEALTHCHECK] Room ${activeRoom} connection status: ${roomStatus}`);
+        if (roomStatus !== 'SUBSCRIBED' && roomStatus !== 'joining') {
+          console.warn(`[HEALTHCHECK] Room channel is not active (${roomStatus}). Recovering channel...`);
+          subscribeRoomChan(activeRoom);
+        }
+      }
+    }, 8000);
+
+    // 2. Reactivate on focus or visibility change
+    const handleReactivation = () => {
+      if (globalCleanedUpRef.current) return;
+      if (!userRef.current) return; // Only reactivate if user is logged in
+      console.log("[REACTIVATION] Tab became active. Checking connection health...");
+
+      if (globalChanStatusRef.current !== 'SUBSCRIBED') {
+        console.log("[REACTIVATION] Global channel is not active. Recovering...");
+        subscribeGlobalChan();
+      }
+
+      const activeRoom = activeRoomIdRef.current;
+      if (activeRoom && roomSyncChanStatusRef.current !== 'SUBSCRIBED') {
+        console.log("[REACTIVATION] Room channel is not active. Recovering...");
+        subscribeRoomChan(activeRoom);
+      }
+    };
+
+    window.addEventListener('focus', handleReactivation);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        handleReactivation();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(healthCheckInterval);
+      window.removeEventListener('focus', handleReactivation);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
   // --- SUPABASE PROD MODE ---
   const initSupabase = async () => {
     try {
@@ -657,14 +665,14 @@ export const RealtimeSyncProvider = ({ children }) => {
           
           // Teardown global channel on logout
           if (globalChanRef.current) {
-            try { supabase.removeChannel(globalChanRef.current); } catch (e) {}
+            try { supabase.removeChannel(globalChanRef.current); } catch { /* ignore cleanup error */ }
             globalChanRef.current = null;
           }
           globalChanStatusRef.current = 'none';
 
           // Teardown room channel on logout
           if (roomSyncChanRef.current) {
-            try { supabase.removeChannel(roomSyncChanRef.current); } catch (e) {}
+            try { supabase.removeChannel(roomSyncChanRef.current); } catch { /* ignore cleanup error */ }
             roomSyncChanRef.current = null;
           }
           roomSyncChanStatusRef.current = 'none';
@@ -672,7 +680,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       });
       if (globalCleanedUpRef.current) {
         if (subscription) {
-          try { subscription.unsubscribe(); } catch (e) {}
+          try { subscription.unsubscribe(); } catch { /* ignore unsubscribe error */ }
         }
         return;
       }
@@ -799,35 +807,39 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
   };
 
-  const fetchFriendships = async (currUserId) => {
-    if (!isSupabaseConfigured) return;
-    const { data } = await supabase
-      .from('friends')
-      .select('*')
-      .or(`user_id_1.eq.${currUserId},user_id_2.eq.${currUserId}`);
-    if (globalCleanedUpRef.current) return;
-    if (data) setFriendsList(data);
-  };
+  // =================================================================
+  // HYBRID INIT & STATE ROUTING
+  // =================================================================
 
-  const fetchDirectMessages = async (currUserId) => {
-    if (!isSupabaseConfigured) return;
-    const { data } = await supabase
-      .from('direct_messages')
-      .select('*')
-      .or(`sender_id.eq.${currUserId},receiver_id.eq.${currUserId}`)
-      .order('created_at', { ascending: true });
-    if (globalCleanedUpRef.current) return;
-    if (data) setDmMessages(data);
-  };
+  useEffect(() => {
+    globalCleanedUpRef.current = false;
+    
+    const runInit = setTimeout(() => {
+      if (globalCleanedUpRef.current) return;
+      if (isSupabaseConfigured) {
+        initSupabase();
+      } else {
+        initLocalFallback();
+      }
+    }, 0);
 
-  const fetchAllProfiles = async () => {
-    if (!isSupabaseConfigured) return;
-    const { data } = await supabase
-      .from('profiles')
-      .select('id, username, avatar_color, xp');
-    if (globalCleanedUpRef.current) return;
-    if (data) setAllProfiles(data);
-  };
+    return () => {
+      clearTimeout(runInit);
+      globalCleanedUpRef.current = true;
+
+      if (isSupabaseConfigured && supabase) {
+        if (globalChanRef.current) {
+          try { supabase.removeChannel(globalChanRef.current); } catch { /* ignore cleanup error */ }
+        }
+        if (roomSyncChanRef.current) {
+          try { supabase.removeChannel(roomSyncChanRef.current); } catch { /* ignore cleanup error */ }
+        }
+        if (authSubscriptionRef.current) {
+          try { authSubscriptionRef.current.unsubscribe(); } catch { /* ignore unsubscribe error */ }
+        }
+      }
+    };
+  }, []);
 
   // --- Auth Actions ---
   const signUp = async (email, password, username) => {
@@ -844,7 +856,7 @@ export const RealtimeSyncProvider = ({ children }) => {
       options: {
         data: {
           username,
-          avatar_color: '#' + Math.floor(Math.random()*16777215).toString(16)
+          avatar_color: generateRandomColor()
         }
       }
     });
@@ -899,7 +911,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     // Try signing in anonymously via Supabase
-    const { data, error } = await supabase.auth.signInAnonymously({
+    const { error } = await supabase.auth.signInAnonymously({
       options: {
         data: {
           username: username || 'Guest Scholar',
@@ -932,104 +944,162 @@ export const RealtimeSyncProvider = ({ children }) => {
   useEffect(() => {
     if (!activeRoomId) return;
 
+    let handleTimeout = null;
+
     if (!isSupabaseConfigured) {
-      // Setup mock participants lists + ourselves
-      const selfProfile = { name: user?.name || 'You', status: 'Joined 🚪', xp: stats.xp, avatarColor: user?.avatarColor };
-      setParticipants([
-        ...(MOCK_PARTICIPANTS[activeRoomId] || []),
-        selfProfile
-      ]);
+      handleTimeout = setTimeout(() => {
+        if (globalCleanedUpRef.current) return;
 
-      setChatMessages([
-        { sender: 'System', text: 'Entered room. Tabbing sync is enabled.', timestamp: 'Now' }
-      ]);
-      setTasks([]);
-      setWhiteboardData(localStorage.getItem(`study_canvas_${activeRoomId}`) || '');
+        // Setup mock participants lists + ourselves
+        const selfProfile = { name: user?.name || 'You', status: 'Joined 🚪', xp: stats.xp, avatarColor: user?.avatarColor };
+        setParticipants([
+          ...(MOCK_PARTICIPANTS[activeRoomId] || []),
+          selfProfile
+        ]);
 
-      // Bind local sync channel receiver
-      if (localBroadcastChannelRef.current) {
-        localBroadcastChannelRef.current.onmessage = (event) => {
-          const { type, payload } = event.data;
-          if (type === 'CHAT_MSG' && payload.roomId === activeRoomId) {
-            setChatMessages(prev => [...prev, payload.message]);
-          } else if (type === 'TASK_UPDATE' && payload.roomId === activeRoomId) {
-            setTasks(payload.tasks);
-          } else if (type === 'TIMER_TOGGLE' && payload.roomId === activeRoomId) {
-            setTimerState(prev => ({
-              ...prev,
-              isRunning: payload.isRunning,
-              secondsLeft: payload.secondsLeft !== undefined ? payload.secondsLeft : prev.secondsLeft,
-              mode: payload.mode || prev.mode
-            }));
-          } else if (type === 'CANVAS_SYNC' && payload.roomId === activeRoomId) {
-            setWhiteboardData(payload.dataURL);
-          } else if (type === 'PARTICIPANT_JOIN' && payload.roomId === activeRoomId) {
-            const { userProfile } = payload;
-            if (userProfile.name !== user?.name) {
-              setParticipants(prev => {
-                if (prev.some(p => p.name === userProfile.name)) return prev;
-                return [...prev, userProfile];
-              });
-              // Send handshake back so the newly joined tab knows we are here!
-              localBroadcastChannelRef.current?.postMessage({
-                type: 'PARTICIPANT_ALIVE',
-                payload: { roomId: activeRoomId, userProfile: selfProfile }
-              });
+        setChatMessages([
+          { sender: 'System', text: 'Entered room. Tabbing sync is enabled.', timestamp: 'Now' }
+        ]);
+        setTasks([]);
+        setWhiteboardData(localStorage.getItem(`study_canvas_${activeRoomId}`) || '');
+
+        // Bind local sync channel receiver
+        if (localBroadcastChannelRef.current) {
+          localBroadcastChannelRef.current.onmessage = (event) => {
+            const { type, payload } = event.data;
+            if (type === 'CHAT_MSG' && payload.roomId === activeRoomId) {
+              setChatMessages(prev => [...prev, payload.message]);
+            } else if (type === 'TASK_UPDATE' && payload.roomId === activeRoomId) {
+              setTasks(payload.tasks);
+            } else if (type === 'TIMER_TOGGLE' && payload.roomId === activeRoomId) {
+              setTimerState(prev => ({
+                ...prev,
+                isRunning: payload.isRunning,
+                secondsLeft: payload.secondsLeft !== undefined ? payload.secondsLeft : prev.secondsLeft,
+                mode: payload.mode || prev.mode
+              }));
+            } else if (type === 'CANVAS_SYNC' && payload.roomId === activeRoomId) {
+              setWhiteboardData(payload.dataURL);
+            } else if (type === 'PARTICIPANT_JOIN' && payload.roomId === activeRoomId) {
+              const { userProfile } = payload;
+              if (userProfile.name !== user?.name) {
+                setParticipants(prev => {
+                  if (prev.some(p => p.name === userProfile.name)) return prev;
+                  return [...prev, userProfile];
+                });
+                // Send handshake back so the newly joined tab knows we are here!
+                localBroadcastChannelRef.current?.postMessage({
+                  type: 'PARTICIPANT_ALIVE',
+                  payload: { roomId: activeRoomId, userProfile: selfProfile }
+                });
+              }
+            } else if (type === 'PARTICIPANT_ALIVE' && payload.roomId === activeRoomId) {
+              const { userProfile } = payload;
+              if (userProfile.name !== user?.name) {
+                setParticipants(prev => {
+                  if (prev.some(p => p.name === userProfile.name)) return prev;
+                  return [...prev, userProfile];
+                });
+              }
+            } else if (type === 'PARTICIPANT_STATUS' && payload.roomId === activeRoomId) {
+              setParticipants(prev => prev.map(p => p.name === payload.username ? { ...p, status: payload.status } : p));
+            } else if (type === 'PARTICIPANT_LEAVE' && payload.roomId === activeRoomId) {
+              setParticipants(prev => prev.filter(p => p.name !== payload.username));
             }
-          } else if (type === 'PARTICIPANT_ALIVE' && payload.roomId === activeRoomId) {
-            const { userProfile } = payload;
-            if (userProfile.name !== user?.name) {
-              setParticipants(prev => {
-                if (prev.some(p => p.name === userProfile.name)) return prev;
-                return [...prev, userProfile];
-              });
-            }
-          } else if (type === 'PARTICIPANT_STATUS' && payload.roomId === activeRoomId) {
-            setParticipants(prev => prev.map(p => p.name === payload.username ? { ...p, status: payload.status } : p));
-          } else if (type === 'PARTICIPANT_LEAVE' && payload.roomId === activeRoomId) {
-            setParticipants(prev => prev.filter(p => p.name !== payload.username));
-          }
-        };
+          };
 
-        // Notify other tabs that we've joined
-        localBroadcastChannelRef.current.postMessage({
-          type: 'PARTICIPANT_JOIN',
-          payload: { roomId: activeRoomId, userProfile: selfProfile }
-        });
-      }
+          // Notify other tabs that we've joined
+          localBroadcastChannelRef.current.postMessage({
+            type: 'PARTICIPANT_JOIN',
+            payload: { roomId: activeRoomId, userProfile: selfProfile }
+          });
+        }
 
-      // Start offline tick local timer
-      setTimerState({ isRunning: false, secondsLeft: 1500, duration: 1500, mode: 'focus', timerMode: 'pomodoro' });
-      return;
-    }
-
-    // --- PROD SUPABASE SYNC LOGIC ---
-    if (activeRoomId) {
-      subscribeRoomChan(activeRoomId);
+        // Start offline tick local timer
+        setTimerState({ isRunning: false, secondsLeft: 1500, duration: 1500, mode: 'focus', timerMode: 'pomodoro' });
+      }, 0);
     } else {
-      if (roomSyncChanRef.current) {
-        try {
-          supabase.removeChannel(roomSyncChanRef.current);
-        } catch (e) {}
-        roomSyncChanRef.current = null;
-      }
-      roomSyncChanStatusRef.current = 'none';
-      setParticipants([]);
-      setChatMessages([]);
-      setTasks([]);
-      setWhiteboardData('');
+      subscribeRoomChan(activeRoomId);
     }
 
     return () => {
+      if (handleTimeout) clearTimeout(handleTimeout);
+
       if (isSupabaseConfigured && roomSyncChanRef.current) {
         try {
           supabase.removeChannel(roomSyncChanRef.current);
-        } catch (e) {}
+        } catch { /* ignore cleanup error */ }
         roomSyncChanRef.current = null;
       }
       roomSyncChanStatusRef.current = 'none';
     };
   }, [activeRoomId]);
+
+  const awardXPAndStats = async (minutesStudied, roomName) => {
+    const gainedXP = Math.round(minutesStudied * 10);
+    const updatedXP = stats.xp + gainedXP;
+    const updatedMinutes = stats.totalMinutes + Math.round(minutesStudied);
+    const updatedSessions = stats.completedSessions + 1;
+
+    setStats(prev => ({
+      ...prev,
+      xp: updatedXP,
+      totalMinutes: updatedMinutes,
+      completedSessions: updatedSessions,
+      sessionHistory: [
+        {
+          id: 'temp-' + Date.now(),
+          roomName,
+          date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          minutes: Math.round(minutesStudied)
+        },
+        ...prev.sessionHistory
+      ]
+    }));
+
+    if (isSupabaseConfigured && user) {
+      // 1. Log Session
+      await supabase.from('session_history').insert({
+        user_id: user.id,
+        room_name: roomName,
+        minutes: Math.round(minutesStudied)
+      });
+
+      // 2. Update Profile totals
+      await supabase
+        .from('profiles')
+        .update({
+          xp: updatedXP,
+          total_minutes: updatedMinutes,
+          completed_sessions: updatedSessions
+        })
+        .eq('id', user.id);
+    }
+  };
+
+  const handleTimerExpirationOnDB = async (room) => {
+    // Toggle Pomodoro state in database
+    const wasFocus = room.timer_current_mode === 'focus';
+    const nextMode = wasFocus ? 'break' : 'focus';
+    const nextDuration = nextMode === 'focus' ? room.timer_duration : 300;
+
+    // Only update if timer is running in local memory to prevent infinite loop races
+    if (timerStateRef.current.isRunning) {
+      await supabase
+        .from('rooms')
+        .update({
+          timer_is_running: false,
+          timer_current_mode: nextMode,
+          timer_paused_seconds_left: nextDuration
+        })
+        .eq('id', room.id);
+
+      // Award XP
+      if (wasFocus) {
+        await awardXPAndStats(room.timer_duration / 60, room.name);
+      }
+    }
+  };
 
   // =================================================================
   // TIMER TICKING LOOP (SERVERTIME COMPARATIVE SYNC)
@@ -1114,72 +1184,6 @@ export const RealtimeSyncProvider = ({ children }) => {
 
     return () => clearInterval(timerIntervalRef.current);
   }, [activeRoomId, rooms]);
-
-  const handleTimerExpirationOnDB = async (room) => {
-    // Toggle Pomodoro state in database
-    const wasFocus = room.timer_current_mode === 'focus';
-    const nextMode = wasFocus ? 'break' : 'focus';
-    const nextDuration = nextMode === 'focus' ? room.timer_duration : 300;
-
-    // Only update if timer is running in local memory to prevent infinite loop races
-    if (timerStateRef.current.isRunning) {
-      await supabase
-        .from('rooms')
-        .update({
-          timer_is_running: false,
-          timer_current_mode: nextMode,
-          timer_paused_seconds_left: nextDuration
-        })
-        .eq('id', room.id);
-
-      // Award XP
-      if (wasFocus) {
-        await awardXPAndStats(room.timer_duration / 60, room.name);
-      }
-    }
-  };
-
-  const awardXPAndStats = async (minutesStudied, roomName) => {
-    const gainedXP = Math.round(minutesStudied * 10);
-    const updatedXP = stats.xp + gainedXP;
-    const updatedMinutes = stats.totalMinutes + Math.round(minutesStudied);
-    const updatedSessions = stats.completedSessions + 1;
-
-    setStats(prev => ({
-      ...prev,
-      xp: updatedXP,
-      totalMinutes: updatedMinutes,
-      completedSessions: updatedSessions,
-      sessionHistory: [
-        {
-          id: 'temp-' + Date.now(),
-          roomName,
-          date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-          minutes: Math.round(minutesStudied)
-        },
-        ...prev.sessionHistory
-      ]
-    }));
-
-    if (isSupabaseConfigured && user) {
-      // 1. Log Session
-      await supabase.from('session_history').insert({
-        user_id: user.id,
-        room_name: roomName,
-        minutes: Math.round(minutesStudied)
-      });
-
-      // 2. Update Profile totals
-      await supabase
-        .from('profiles')
-        .update({
-          xp: updatedXP,
-          total_minutes: updatedMinutes,
-          completed_sessions: updatedSessions
-        })
-        .eq('id', user.id);
-    }
-  };
 
   // --- Study Room Handlers ---
   const joinRoom = (roomId) => {
@@ -1933,7 +1937,8 @@ export const RealtimeSyncProvider = ({ children }) => {
         sendFriendRequest,
         acceptFriendRequest,
         cancelOrRemoveFriend,
-        sendDirectMessage
+        sendDirectMessage,
+        isSupabaseConfigured
       }}
     >
       {children}
