@@ -176,18 +176,43 @@ export const RealtimeSyncProvider = ({ children }) => {
     timerStateRef.current = timerState;
   }, [timerState]);
 
+  const isPopStateRef = useRef(false);
+
   useEffect(() => {
     activeRoomIdRef.current = activeRoomId;
   }, [activeRoomId]);
 
 
   useEffect(() => {
+    if (isPopStateRef.current) {
+      isPopStateRef.current = false;
+      return;
+    }
     if (activeRoomId) {
       window.history.pushState(null, '', `/?room=${activeRoomId}`);
     } else {
       window.history.pushState(null, '', '/');
     }
   }, [activeRoomId]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const room = urlParams.get('room') || null;
+      if (room !== activeRoomIdRef.current) {
+        isPopStateRef.current = true;
+        if (!room && activeRoomIdRef.current) {
+          leaveRoom(activeRoomIdRef.current);
+        } else if (room) {
+          joinRoom(room);
+        }
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [rooms, user]);
 
 
 
@@ -1214,11 +1239,10 @@ export const RealtimeSyncProvider = ({ children }) => {
   const leaveRoom = async (roomId) => {
     const roomExists = rooms.some(r => r.id === roomId);
     if (roomExists) {
-      try {
-        await sendSystemAlert(roomId, `${user?.name || 'Someone'} left the study room.`);
-      } catch (err) {
+      // Send alert in the background (fire-and-forget) to keep UI responsive
+      sendSystemAlert(roomId, `${user?.name || 'Someone'} left the study room.`).catch(err => {
         console.warn("Failed to send leave system alert:", err);
-      }
+      });
     }
     
     if (!isSupabaseConfigured && user) {
@@ -1230,11 +1254,10 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     if (isSupabaseConfigured && roomSyncChanRef.current) {
-      try {
-        await roomSyncChanRef.current.untrack();
-      } catch (err) {
+      // Untrack presence in the background to prevent blocking UI transitions
+      roomSyncChanRef.current.untrack().catch(err => {
         console.warn("Failed presence untrack:", err);
-      }
+      });
     }
     setActiveRoomId(null);
   };

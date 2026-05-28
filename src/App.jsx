@@ -5,7 +5,7 @@ import StudyRoom from './pages/StudyRoom';
 import { BookOpen, LogOut, Flame, Trophy } from 'lucide-react';
 
 function AppContent() {
-  const { user, logout, stats, activeRoomId, loading } = useRealtimeSync();
+  const { user, logout, stats, activeRoomId, loading, leaveRoom } = useRealtimeSync();
 
   if (loading) {
     return (
@@ -24,7 +24,12 @@ function AppContent() {
     <div className="app-container">
       {/* Universal Sticky Header */}
       <header className="navbar">
-        <a href="#" className="nav-brand" onClick={(e) => { e.preventDefault(); }}>
+        <a href="#" className="nav-brand" onClick={(e) => { 
+          e.preventDefault(); 
+          if (activeRoomId) {
+            leaveRoom(activeRoomId);
+          }
+        }}>
           <span><BookOpen size={18} /></span> FocusDen
         </a>
         
