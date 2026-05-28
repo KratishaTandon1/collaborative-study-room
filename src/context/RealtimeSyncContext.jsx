@@ -297,7 +297,7 @@ export const RealtimeSyncProvider = ({ children }) => {
   };
 
   const broadcastGlobal = (event, payload) => {
-    if (isSupabaseConfigured && globalChanRef.current && globalChanStatusRef.current === 'SUBSCRIBED') {
+    if (isSupabaseConfigured && globalChanRef.current) {
       globalChanRef.current.send({
         type: 'broadcast',
         event,
@@ -379,26 +379,12 @@ export const RealtimeSyncProvider = ({ children }) => {
           fetchFriendships(userId);
         }
       })
-      .on('broadcast', { event: 'DM_MSG' }, ({ payload }) => {
+      .on('broadcast', { event: 'DM_UPDATE' }, ({ payload }) => {
         if (globalCleanedUpRef.current) return;
         const currUserId = userRef.current?.id;
-        if (currUserId && (payload.sender_id === currUserId || payload.receiver_id === currUserId)) {
-          console.log("[REALTIME-GLOBAL] Received broadcast DM_MSG, appending...");
-          setDmMessages(prev => {
-            if (prev.some(d => d.id === payload.id)) return prev;
-            const matchIndex = prev.findIndex(d => 
-              String(d.id).startsWith('temp-dm-') && 
-              d.sender_id === payload.sender_id && 
-              d.receiver_id === payload.receiver_id && 
-              d.text === payload.text
-            );
-            if (matchIndex !== -1) {
-              const next = [...prev];
-              next[matchIndex] = payload;
-              return next;
-            }
-            return [...prev, payload];
-          });
+        if (currUserId && (payload.senderId === currUserId || payload.receiverId === currUserId)) {
+          console.log("[REALTIME-GLOBAL] Received broadcast DM_UPDATE, refetching DMs...");
+          fetchDirectMessages(currUserId);
         }
       })
       .on('broadcast', { event: 'PROFILE_UPDATE' }, () => {
@@ -2220,7 +2206,7 @@ export const RealtimeSyncProvider = ({ children }) => {
     }
 
     try {
-      const { data: dbDm, error } = await supabase
+      const { error } = await supabase
         .from('direct_messages')
         .insert({
           sender_id: userRef.current.id,
@@ -2229,20 +2215,15 @@ export const RealtimeSyncProvider = ({ children }) => {
           text,
           is_invite: isInvite,
           room_id: roomId
-        })
-        .select()
-        .maybeSingle();
+        });
 
       if (error) throw error;
 
-      if (dbDm) {
-        setDmMessages(prev => {
-          const filtered = prev.filter(d => d.id !== tempId);
-          if (filtered.some(d => d.id === dbDm.id)) return filtered;
-          return [...filtered, dbDm];
-        });
-        broadcastGlobal('DM_MSG', dbDm);
-      }
+      // Fetch DMs for the sender immediately to resolve tempId and sync database record
+      await fetchDirectMessages(userRef.current.id);
+
+      // Broadcast update to other users
+      broadcastGlobal('DM_UPDATE', { senderId: userRef.current.id, receiverId });
     } catch (err) {
       // Revert optimistic DM
       setDmMessages(prev => prev.filter(d => d.id !== tempId));
